@@ -9,6 +9,11 @@ notes/
 ghidra-projects/
 *.log
 
+# 观测面板运行时产物
+gateway/logs/
+dashboard/node_modules/
+dashboard/dist/
+
 # Python
 __pycache__/
 *.pyc

@@ -29,6 +29,14 @@ fi
 
 mkdir -p state notes work
 
+# customer 会话目录：cwd 与 Master 的 /app 不同，保证 opencode 会话隔离；
+# 通过软链复用同一份 opencode 配置与 state/work，提示词里的相对路径一字不用改。
+CUSTOMER_DIR="${CTF_CUSTOMER_DIR:-/app/customer}"
+mkdir -p "$CUSTOMER_DIR"
+ln -sfn /app/opencode.json "$CUSTOMER_DIR/opencode.json"
+ln -sfn /app/state "$CUSTOMER_DIR/state"
+ln -sfn /app/work "$CUSTOMER_DIR/work"
+
 if [ "${RUN_ONCE:-0}" = "1" ]; then
   exec opencode run --agent ctf-master --auto "$(cat prompts/kickoff-master.md)"
 fi

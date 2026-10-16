@@ -154,6 +154,36 @@ docker run --rm \
 - 容器内用的是 `docker/opencode.json`（Linux 版：无 `cmd /c` 包装，Chrome 无头 + no-sandbox），与本地 Windows 的 `opencode.json` 是两份，**改 agent 定义时两份要同步改**。
 - Chrome 以 `--headless --no-sandbox` 运行（容器内 root 的必要姿势）；Ghidra 12.1.4 已内置并通过 `GHIDRA_INSTALL_DIR=/opt/ghidra` 提供给 pyghidra-mcp。
 
+## 观测面板（实时推流）
+
+本地起一个 Web 面板，**实时**（SSE 推流，非轮询刷新）观测容器内正在发生的一切，并可直接与 ctf-customer 对话。
+
+**数据通路**：容器内 `docker/llm-forwarder.py` 在同一条反向 WS 隧道上，除转发 LLM 外还上报事件
+（LLM 请求/响应、`state/` 与 `work/` 文件变更、worker 进程与资源、环境队列），本地 `gateway` 维护
+事件总线 + 环形缓冲 + JSONL 落盘，并以 SSE 广播给浏览器；Chat 走同一条隧道下行到容器内的 customer
+会话（cwd `/app/customer`，与 Master 的 `/app` 会话隔离，故 `-c` 不会串上下文），一切操作仍由
+customer 写 `state/REQUESTS.md`、由 Master 执行——**没有任何绕过 Master 的旁路**。
+
+**启动**（本机）：
+
+```bash
+# 1) 构建前端（首次或改前端后；若 shell 有 NODE_ENV=production 需 --include=dev）
+cd dashboard && npm install && npm run build && cd ..
+
+# 2) 起网关 + 面板（同时是容器要连的隧道服务端）
+python gateway/gateway.py --config gateway/gateway.config.json
+#   面板地址 http://127.0.0.1:8791
+```
+
+**页面**：总览（容器指标 / worker 进程 / 最近 AI 活动）、题目（SCOREBOARD）、题目详情（AI 请求流 · notes.md · run.log · 进程）、Master 流、环境（台账 + 申请队列）、Chat（与 customer 对话，历史留存 `gateway/logs/chat.jsonl`）。
+
+**请求归属**：每条 LLM 请求按发起进程的 cwd 精确判定 agent 与题号（worker → `work/<id>`、customer → `customer`、其余 → `master`），**零配置**，不用改 Master 的派发命令。
+
+**配置 / 关闭**：`gateway.config.json` 的 `dashboard_port` / `dashboard_host` / `static` / `logs_dir`；`--dashboard-port 0` 可关闭面板。面板默认只绑 `127.0.0.1`。
+容器侧可调 `CTF_WATCH_INTERVAL`（采集间隔秒，默认 1）与 `CTF_CUSTOMER_DIR`（customer 会话目录）。
+
+**事件落盘**：`gateway/logs/<topic>.jsonl`（llm_req / llm_resp / chat / fs / proc / metrics / env / scoreboard），供事后复盘。
+
 ## 与系统交互
 
 - 对 Customer 说："现在进度如何" / "优先做 web 第 8 题" / "授权查看第 12 题提示"（会告知 80% 扣分后果）/ "pwn 并行数提到 5 个"。

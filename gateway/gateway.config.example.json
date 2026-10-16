@@ -1,6 +1,10 @@
 {
   "port": 8790,
   "http_port": 8788,
+  "dashboard_port": 8791,
+  "dashboard_host": "127.0.0.1",
+  "static": "dashboard/dist",
+  "logs_dir": "gateway/logs",
   "token": "改成你的共享密钥（与容器 ctf.config.json 的 gateway.token 一致）",
   "upstream": {
     "base_url": "https://api.example.com/v1",

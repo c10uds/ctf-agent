@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
-"""AIxCTF 本地 LLM 网关。
+"""AIxCTF 本地网关：LLM 转发 + 观测面板后端。
 
-容器内转发器经反向 WS 隧道把 OpenAI 兼容请求送到这里，本网关按本地配置
-重写 model/key 后转发到真实上游，响应流式回传。容器侧完全无感。
+一个进程干三件事：
+1) 反向 WS 隧道（容器侧 llm-forwarder 连入）：LLM 请求转发、事件上行、chat 下行；
+2) LLM 转发：容器内 opencode → 这里 → 真实上游（重写 model/key，流式回传）；
+3) 观测面板：托管前端静态文件 + /api/snapshot + /api/stream(SSE) + /api/history + /api/chat。
+
+事件模型：容器侧把 llm_req / llm_resp / fs / proc / metrics / env / heartbeat / chat
+事件经隧道推上来，本进程维护内存快照 + 环形缓冲 + JSONL 落盘，并以 SSE 实时广播给浏览器
+（推流而非轮询）。
 
 用法：
   python gateway.py --config gateway.config.json
   python gateway.py --upstream https://api.example.com/v1 --key sk-xxx --model gpt-4o-mini
-另外监听一个本地 HTTP 端口（默认 8788），本机程序也可直接走网关（同样的重写逻辑）。
 """
 import argparse
 import json
 import logging
+import mimetypes
+import os
+import queue
 import sys
 import threading
 import time
+from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import requests
 from websockets.sync.server import serve
@@ -25,8 +35,125 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("llm-gateway")
 
 PREVIEW = 200
-HOP_HEADERS = {"host", "content-length", "connection", "authorization", "accept-encoding", "transfer-encoding", "content-encoding"}
+RING_SIZE = 500
+HOP_HEADERS = {"host", "content-length", "connection", "authorization", "accept-encoding",
+               "transfer-encoding", "content-encoding"}
 
+
+# ---------------------------------------------------------------- 事件总线
+
+class Hub:
+    """内存快照 + 环形缓冲 + JSONL 落盘 + SSE 订阅者广播。"""
+
+    def __init__(self, logs_dir: Path):
+        self.lock = threading.Lock()
+        self.subs: list[queue.Queue] = []
+        self.ring: dict[str, deque] = defaultdict(lambda: deque(maxlen=RING_SIZE))
+        self.state: dict = {
+            "container": None, "metrics": None, "proc": None,
+            "workers": {}, "files": {}, "scoreboard": [],
+            "llm": [], "chat": [], "environments": [], "requests": [],
+        }
+        self.logs_dir = logs_dir
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self._log_files: dict[str, object] = {}
+
+    # -- 落盘
+    def _append_log(self, topic: str, event: dict):
+        try:
+            fh = self._log_files.get(topic)
+            if fh is None:
+                fh = open(self.logs_dir / f"{topic}.jsonl", "a", encoding="utf-8")
+                self._log_files[topic] = fh
+            fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+            fh.flush()
+        except Exception as exc:  # 落盘失败不影响实时观测
+            log.debug("写日志失败 %s: %s", topic, exc)
+
+    # -- 状态归并
+    def _merge_state(self, topic: str, data: dict):
+        s = self.state
+        if topic == "hello":
+            s["container"] = data
+        elif topic == "metrics":
+            s["metrics"] = data
+        elif topic == "proc":
+            s["proc"] = data
+            s["workers"] = {w["id"]: w for w in data.get("workers", [])}
+        elif topic == "env":
+            s["environments"] = data.get("environments", [])
+            s["requests"] = data.get("requests", [])
+        elif topic == "scoreboard":
+            s["scoreboard"] = data.get("rows", [])
+        elif topic == "fs":
+            path = data.get("path")
+            if path:
+                s["files"][path] = {"mtime": data.get("mtime"), "size": data.get("size"),
+                                    "challenge_id": data.get("challenge_id")}
+        elif topic == "llm_req":
+            s["llm"].append(data)
+            del s["llm"][:-RING_SIZE]
+        elif topic == "llm_resp":
+            rid = data.get("id")
+            for item in reversed(s["llm"]):
+                if item.get("id") == rid:
+                    item.update({k: v for k, v in data.items() if v is not None and k != "preview"})
+                    if data.get("preview"):
+                        item["resp_preview"] = data["preview"]
+                    break
+        elif topic == "chat":
+            cid = data.get("id")
+            for item in s["chat"]:
+                if item.get("id") == cid:
+                    if data.get("delta"):
+                        item["text"] = (item.get("text") or "") + data["delta"]
+                    for k, v in data.items():
+                        if v is not None and k != "delta":
+                            item[k] = v
+                    break
+            else:
+                s["chat"].append({k: v for k, v in data.items() if k != "delta"})
+            del s["chat"][:-RING_SIZE]
+
+    def publish(self, topic: str, data: dict):
+        event = {"topic": topic, "ts": data.get("ts") or time.time(), "data": data}
+        with self.lock:
+            self.ring[topic].append(event)
+            self._merge_state(topic, data)
+            subs = list(self.subs)
+            self._append_log(topic, event)
+        for q in subs:
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                pass
+
+    def subscribe(self) -> queue.Queue:
+        q: queue.Queue = queue.Queue(maxsize=1000)
+        with self.lock:
+            self.subs.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue):
+        with self.lock:
+            if q in self.subs:
+                self.subs.remove(q)
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return json.loads(json.dumps(self.state, ensure_ascii=False, default=str))
+
+    def recent(self, topics: list[str] | None, limit: int) -> list[dict]:
+        with self.lock:
+            if topics:
+                items = [e for t in topics for e in self.ring.get(t, ())]
+            else:
+                items = [e for dq in self.ring.values() for e in dq]
+        items.sort(key=lambda e: e.get("ts") or 0)
+        return items[-limit:]
+
+
+# ---------------------------------------------------------------- LLM 路由
 
 class Router:
     """当前路由：单一上游 + 模型重写。"""
@@ -53,9 +180,11 @@ class Router:
 
 
 ROUTER: Router
+HUB: Hub
+TOKEN = "changeme"
 
 
-def prompt_preview(body: str) -> str:
+def last_user_preview(body: str) -> str:
     try:
         msgs = json.loads(body).get("messages") or []
         for m in reversed(msgs):
@@ -69,8 +198,8 @@ def prompt_preview(body: str) -> str:
     return ""
 
 
-def proxy(method: str, path: str, headers: dict, body: str):
-    """返回 (status, resp_headers, chunk_iter, log_tail)；异常抛 RuntimeError。"""
+def proxy(method: str, path: str, headers: dict, body: str, req_meta: dict | None = None):
+    """转发一次 LLM 请求；返回 (status, headers, chunk_iter)。异常抛 RuntimeError。"""
     base_url, api_key, real_model = ROUTER.snapshot()
     if not path.startswith("/v1"):
         raise RuntimeError(f"仅支持 /v1 路径: {path}")
@@ -81,16 +210,27 @@ def proxy(method: str, path: str, headers: dict, body: str):
     out_headers["Accept-Encoding"] = "identity"
     out_headers["Content-Type"] = "application/json"
 
-    orig_model = None
+    orig_model, stream = None, None
     out_body = body
     try:
         j = json.loads(body)
         orig_model = j.get("model")
+        stream = j.get("stream")
         if real_model:
             j["model"] = real_model
             out_body = json.dumps(j, ensure_ascii=False)
     except Exception:
         pass
+
+    meta = dict(req_meta or {})
+    prefix = meta.get("prefix", "")
+
+    if HUB is not None:
+        HUB.publish("llm_req", {
+            "id": meta.get("id"), "agent": meta.get("agent"), "challenge_id": meta.get("challenge_id"),
+            "prefix": prefix, "model": real_model or orig_model, "orig_model": orig_model,
+            "stream": stream, "preview": last_user_preview(body), "path": path,
+        })
 
     t0 = time.time()
     r = requests.request(method, url, headers=out_headers, data=out_body.encode("utf-8"),
@@ -99,10 +239,15 @@ def proxy(method: str, path: str, headers: dict, body: str):
     if status != 200:
         content = r.content.decode("utf-8", "replace")[:500]
         r.close()
+        if HUB is not None:
+            HUB.publish("llm_resp", {"id": meta.get("id"), "agent": meta.get("agent"),
+                                     "challenge_id": meta.get("challenge_id"), "status": status,
+                                     "dur": round(time.time() - t0, 2), "error": content,
+                                     "preview": content[:PREVIEW]})
         raise RuntimeError(f"上游返回 {status}: {content}")
 
-    preview_buf = []
-    usage = {}
+    preview_buf: list[str] = []
+    usage: dict = {}
 
     def chunks():
         try:
@@ -110,7 +255,6 @@ def proxy(method: str, path: str, headers: dict, body: str):
                 if not data:
                     continue
                 text = data.decode("utf-8", "replace")
-                # 收集响应预览与 token 用量（SSE data 行）
                 for line in text.splitlines():
                     if not line.startswith("data:") or "[DONE]" in line:
                         continue
@@ -127,17 +271,48 @@ def proxy(method: str, path: str, headers: dict, body: str):
                 yield text
         finally:
             r.close()
+            dur = round(time.time() - t0, 2)
             log.info("[响应] %s %s status=%d dur=%.1fs tokens=%s | %s",
-                     method, path, status, time.time() - t0,
-                     usage.get("total_tokens", "-"), "".join(preview_buf)[:PREVIEW].replace("\n", " "))
+                     method, path, status, dur, usage.get("total_tokens", "-"),
+                     "".join(preview_buf)[:PREVIEW].replace("\n", " "))
+            if HUB is not None:
+                HUB.publish("llm_resp", {
+                    "id": meta.get("id"), "agent": meta.get("agent"),
+                    "challenge_id": meta.get("challenge_id"), "status": status, "dur": dur,
+                    "tokens": usage.get("total_tokens"),
+                    "prompt_tokens": usage.get("prompt_tokens"),
+                    "completion_tokens": usage.get("completion_tokens"),
+                    "preview": "".join(preview_buf)[:PREVIEW].replace("\n", " "),
+                })
 
-    log.info("[请求] %s %s model=%s→%s | %s", method, path, orig_model, real_model or orig_model, prompt_preview(body))
+    log.info("[请求] %s %s agent=%s challenge=%s model=%s→%s | %s",
+             method, path, meta.get("agent"), meta.get("challenge_id"),
+             orig_model, real_model or orig_model, last_user_preview(body))
     return status, dict(r.headers), chunks()
 
 
-# ---------- 隧道端（容器反向连接） ----------
+# ---------------------------------------------------------------- 隧道端（容器反向连接）
+
+TUNNEL_LOCK = threading.Lock()
+TUNNEL_WS = None
+CHAT_SEQ = 0
+
+
+def tunnel_send(frame: dict) -> bool:
+    with TUNNEL_LOCK:
+        ws = TUNNEL_WS
+    if ws is None:
+        return False
+    try:
+        ws.send(json.dumps(frame, ensure_ascii=False))
+        return True
+    except Exception as exc:
+        log.warning("隧道发送失败：%s", exc)
+        return False
+
 
 def tunnel_handler(ws):
+    global TUNNEL_WS
     try:
         path = ws.request.path
     except Exception:
@@ -150,6 +325,8 @@ def tunnel_handler(ws):
         ws.close(4401)
         return
     peer = ws.remote_address
+    with TUNNEL_LOCK:
+        TUNNEL_WS = ws
     log.info("隧道已连接：%s", peer)
     try:
         while True:
@@ -160,35 +337,48 @@ def tunnel_handler(ws):
                 f = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            if f.get("type") == "http_req":
+            t = f.get("type")
+            if t == "http_req":
                 threading.Thread(target=handle_tunnel_req, args=(ws, f), daemon=True).start()
-    except Exception:
-        pass
-    log.info("隧道断开：%s", peer)
-
-
-def ws_send(ws, frame: dict):
-    ws.send(json.dumps(frame, ensure_ascii=False))
+            elif t == "event":
+                HUB.publish(f.get("topic", "unknown"), f.get("data") or {})
+            elif t == "hello":
+                HUB.publish("hello", f.get("data") or {})
+            else:
+                log.debug("未知隧道帧：%s", t)
+    except Exception as exc:
+        log.info("隧道读循环结束：%s", exc)
+    finally:
+        with TUNNEL_LOCK:
+            if TUNNEL_WS is ws:
+                TUNNEL_WS = None
+        HUB.publish("hello", {"connected": False})
+        log.info("隧道断开：%s", peer)
 
 
 def handle_tunnel_req(ws, f: dict):
     rid = f.get("id")
+    meta = {"id": rid, "agent": f.get("agent"), "challenge_id": f.get("challenge_id"),
+            "prefix": f.get("prefix")}
     try:
-        status, headers, chunks = proxy(f.get("method", "POST"), f.get("path", ""), f.get("headers") or {}, f.get("body") or "")
-        ws_send(ws, {"type": "http_resp_begin", "id": rid, "status": status,
-                     "headers": {k: v for k, v in headers.items() if k.lower() not in HOP_HEADERS}})
+        status, headers, chunks = proxy(f.get("method", "POST"), f.get("path", ""),
+                                        f.get("headers") or {}, f.get("body") or "", meta)
+        ws.send(json.dumps({"type": "http_resp_begin", "id": rid, "status": status,
+                            "headers": {k: v for k, v in headers.items() if k.lower() not in HOP_HEADERS}},
+                           ensure_ascii=False))
         for c in chunks:
-            ws_send(ws, {"type": "http_resp_chunk", "id": rid, "data": c})
-        ws_send(ws, {"type": "http_resp_end", "id": rid})
-    except Exception as e:
-        log.warning("隧道请求 %s 失败：%s", rid, e)
+            ws.send(json.dumps({"type": "http_resp_chunk", "id": rid, "data": c}, ensure_ascii=False))
+        ws.send(json.dumps({"type": "http_resp_end", "id": rid}, ensure_ascii=False))
+    except Exception as exc:
+        log.warning("隧道请求 %s 失败：%s", rid, exc)
         try:
-            ws_send(ws, {"type": "http_resp_error", "id": rid, "message": str(e)})
+            ws.send(json.dumps({"type": "http_resp_error", "id": rid, "message": str(exc)},
+                               ensure_ascii=False))
         except Exception:
             pass
 
 
-# ---------- 本地直连 HTTP 端（本机程序也可走网关） ----------
+# ---------------------------------------------------------------- 本地直连 LLM 端
 
 class DirectHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -213,7 +403,8 @@ class DirectHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
             headers = {k: v for k, v in self.headers.items()}
-            status, rheaders, chunks = proxy(self.command, self.path, headers, body)
+            status, rheaders, chunks = proxy(self.command, self.path, headers, body,
+                                             {"agent": "direct"})
             self.send_response(status)
             for k, v in rheaders.items():
                 if k.lower() not in HOP_HEADERS:
@@ -226,8 +417,8 @@ class DirectHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
-        except Exception as e:
-            data = json.dumps({"error": str(e)}, ensure_ascii=False).encode()
+        except Exception as exc:
+            data = json.dumps({"error": str(exc)}, ensure_ascii=False).encode()
             try:
                 self.send_response(502)
                 self.send_header("Content-Type", "application/json")
@@ -238,12 +429,157 @@ class DirectHandler(BaseHTTPRequestHandler):
                 pass
 
 
+# ---------------------------------------------------------------- 观测面板 HTTP（SSE）
+
+STATIC_DIR: Path | None = None
+
+
+class PanelHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        log.debug("panel " + fmt, *args)
+
+    # -- 工具
+    def _json(self, obj, status=200):
+        data = json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _read_body(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        if not length:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+        except Exception:
+            return {}
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/snapshot":
+            return self._json(HUB.snapshot())
+        if path == "/api/stream":
+            return self._sse()
+        if path == "/api/history":
+            return self._history()
+        return self._static(path)
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/chat":
+            return self._chat()
+        self._json({"error": "not found"}, 404)
+
+    # -- SSE 实时推流
+    def _sse(self):
+        q = HUB.subscribe()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+
+            def write_event(topic: str, data: dict):
+                payload = json.dumps({"topic": topic, "data": data}, ensure_ascii=False, default=str)
+                self.wfile.write(f"event: {topic}\ndata: {payload}\n\n".encode("utf-8"))
+
+            write_event("snapshot", HUB.snapshot())
+            for e in HUB.recent(["llm_req", "llm_resp", "chat", "env", "metrics", "hello", "scoreboard"], 120):
+                write_event("replay", e)
+            self.wfile.flush()
+
+            while True:
+                try:
+                    event = q.get(timeout=15)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                payload = json.dumps(event, ensure_ascii=False, default=str)
+                self.wfile.write(f"event: {event['topic']}\ndata: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+        except Exception as exc:
+            log.debug("SSE 连接结束：%s", exc)
+        finally:
+            HUB.unsubscribe(q)
+
+    def _history(self):
+        from urllib.parse import parse_qs, urlparse
+
+        qs = parse_qs(urlparse(self.path).query)
+        topics = qs.get("topic")
+        limit = int((qs.get("limit") or ["200"])[0])
+        items = HUB.recent(topics, limit)
+        challenge = qs.get("challenge", [None])[0]
+        if challenge:
+            items = [e for e in items if str((e.get("data") or {}).get("challenge_id")) == str(challenge)]
+        self._json(items)
+
+    def _chat(self):
+        body = self._read_body()
+        text = (body.get("text") or "").strip()
+        if not text:
+            return self._json({"error": "empty text"}, 400)
+        global CHAT_SEQ
+        with TUNNEL_LOCK:
+            CHAT_SEQ += 1
+            cid = CHAT_SEQ
+        if not tunnel_send({"type": "chat_req", "id": cid, "text": text}):
+            return self._json({"error": "隧道未连接（容器侧未上线）"}, 503)
+        HUB.publish("chat", {"id": cid, "role": "user", "text": text, "done": True})
+        return self._json({"id": cid})
+
+    # -- 静态文件（SPA）
+    def _static(self, path: str):
+        if STATIC_DIR is None or not STATIC_DIR.exists():
+            data = ("面板静态文件未构建。请在 dashboard/ 下执行 `npm install && npm run build`，"
+                    "然后用 --static dashboard/dist 启动。\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        rel = path.lstrip("/") or "index.html"
+        target = (STATIC_DIR / rel).resolve()
+        try:
+            target.relative_to(STATIC_DIR.resolve())
+        except ValueError:
+            return self._json({"error": "forbidden"}, 403)
+        if not target.is_file():
+            target = STATIC_DIR / "index.html"
+        if not target.is_file():
+            return self._json({"error": "not found"}, 404)
+        data = target.read_bytes()
+        ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        if target.name == "index.html":
+            self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+
+# ---------------------------------------------------------------- 启动
+
 def main():
-    global TOKEN, ROUTER
-    p = argparse.ArgumentParser(description="AIxCTF 本地 LLM 网关")
+    global TOKEN, ROUTER, HUB, STATIC_DIR
+    p = argparse.ArgumentParser(description="AIxCTF 本地网关 + 观测面板")
     p.add_argument("--config", help="gateway.config.json 路径")
     p.add_argument("--port", type=int, help="隧道监听端口（默认 8790）")
-    p.add_argument("--http-port", type=int, help="本地直连 HTTP 端口（默认 8788，0 关闭）")
+    p.add_argument("--http-port", type=int, help="本地直连 LLM 端口（默认 8788，0 关闭）")
+    p.add_argument("--dashboard-port", type=int, help="观测面板端口（默认 8791，0 关闭）")
+    p.add_argument("--dashboard-host", help="面板绑定地址（默认 127.0.0.1）")
+    p.add_argument("--static", help="前端构建产物目录（默认 dashboard/dist）")
+    p.add_argument("--logs-dir", help="事件 JSONL 落盘目录（默认 gateway/logs）")
     p.add_argument("--token", help="隧道鉴权 token")
     p.add_argument("--upstream", help="上游 base_url，如 https://api.example.com/v1")
     p.add_argument("--key", help="上游 api key")
@@ -256,6 +592,12 @@ def main():
             cfg = json.load(f)
     port = args.port or cfg.get("port", 8790)
     http_port = args.http_port if args.http_port is not None else cfg.get("http_port", 8788)
+    dash_port = (args.dashboard_port if args.dashboard_port is not None
+                 else cfg.get("dashboard_port", 8791))
+    dash_host = args.dashboard_host or cfg.get("dashboard_host", "127.0.0.1")
+    static_dir = Path(args.static or cfg.get("static", "dashboard/dist"))
+    logs_dir = Path(args.logs_dir or cfg.get("logs_dir", "gateway/logs"))
+
     TOKEN = args.token or cfg.get("token", "changeme")
     up = cfg.get("upstream") or {}
     ROUTER = Router(
@@ -263,6 +605,9 @@ def main():
         api_key=args.key or up.get("api_key", ""),
         model=args.model or up.get("model", ""),
     )
+    HUB = Hub(logs_dir)
+    STATIC_DIR = static_dir
+
     if TOKEN == "changeme":
         log.warning("使用默认 token 'changeme'，请通过 --token 或配置文件设置共享密钥")
     if not ROUTER.base_url:
@@ -271,7 +616,13 @@ def main():
     if http_port:
         httpd = ThreadingHTTPServer(("0.0.0.0", http_port), DirectHandler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        log.info("本地直连端口：http://127.0.0.1:%d/v1", http_port)
+        log.info("本地直连 LLM 端口：http://127.0.0.1:%d/v1", http_port)
+
+    if dash_port:
+        panel = ThreadingHTTPServer((dash_host, dash_port), PanelHandler)
+        threading.Thread(target=panel.serve_forever, daemon=True).start()
+        state = "已构建" if (STATIC_DIR / "index.html").is_file() else "未构建（请 npm run build）"
+        log.info("观测面板：http://%s:%d  静态文件 %s [%s]", dash_host, dash_port, STATIC_DIR, state)
 
     log.info("隧道监听 0.0.0.0:%d（容器侧连接 ws://<你的IP>:%d/tunnel?token=***）", port, port)
     with serve(tunnel_handler, "0.0.0.0", port, max_size=None) as server:

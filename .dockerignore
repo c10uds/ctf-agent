@@ -4,6 +4,7 @@ work/
 notes/
 ghidra-projects/
 node_modules/
+dashboard/
 *.log
 Dockerfile
 .dockerignore

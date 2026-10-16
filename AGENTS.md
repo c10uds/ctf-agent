@@ -72,6 +72,8 @@
 │   └── output/            # 大输出文件
 ├── prompts/               # 三个角色的系统提示词 + kickoff
 ├── tools/                 # 工具脚本（ghidra_export.py 归档、archive_challenge.sh 解压）
+├── gateway/               # 本地 LLM 网关 + 观测面板后端（隧道/事件总线/SSE），非 agent 侧
+├── dashboard/             # 观测面板前端（React+Vite，npm 构建，本地运行，不进镜像）
 └── opencode.json          # agent 与 MCP 配置
 ```
 
