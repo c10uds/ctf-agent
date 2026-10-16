@@ -1,0 +1,10 @@
+{
+  "platform": {
+    "team_agent_key": "填：平台环境配置页的 Agent Key",
+    "challenge_api_endpoint": "填：题目服务器 Agent API 端点，例如 https://xxx.example.com/api/challenge/v1/agent"
+  },
+  "gateway": {
+    "server_url": "填：你本机 LLM 网关地址，例如 http://192.168.1.10:8790",
+    "token": "填：自定义共享密钥，与本地网关 --token 一致"
+  }
+}

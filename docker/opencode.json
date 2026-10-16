@@ -1,0 +1,80 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "ctf-customer",
+  "subagent_depth": 2,
+  "share": "disabled",
+  "autoupdate": false,
+  "permission": {
+    "external_directory": "allow"
+  },
+  "compaction": {
+    "auto": true,
+    "prune": true
+  },
+  "mcp": {
+    "aixctf-challenge": {
+      "type": "remote",
+      "url": "{env:CHALLENGE_API_ENDPOINT}/mcp",
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer {env:TEAM_AGENT_KEY}"
+      },
+      "timeout": 30000
+    },
+    "chrome": {
+      "type": "local",
+      "command": ["chrome-devtools-mcp", "--headless=true", "--isolated=true", "--acceptInsecureCerts=true", "--no-usage-statistics", "--chromeArg=--no-sandbox", "--chromeArg=--disable-dev-shm-usage", "--chromeArg=--disable-gpu", "--chromeArg=--no-first-run"],
+      "timeout": 120000
+    },
+    "ghidra": {
+      "type": "local",
+      "command": ["pyghidra-mcp", "--transport", "stdio", "--project-path", "ghidra-projects"],
+      "timeout": 180000
+    }
+  },
+  "agent": {
+    "ctf-customer": {
+      "description": "CTF 用户接口人。与用户聊天、汇报比赛进度、把用户指令写入 state/REQUESTS.md 供 CTF-Master 执行。",
+      "mode": "primary",
+      "prompt": "{file:./prompts/ctf-customer.md}",
+      "tools": {
+        "aixctf-challenge_submit_flag": false,
+        "aixctf-challenge_start_challenge": false,
+        "aixctf-challenge_stop_challenge": false,
+        "aixctf-challenge_view_hint": false
+      },
+      "permission": {
+        "task": {
+          "*": "deny",
+          "ctf-master": "allow"
+        }
+      }
+    },
+    "ctf-master": {
+      "description": "CTF 比赛总指挥。维护全局状态，派发任务给 ctf-sliver 并行解题，统一管理动态环境与 flag 提交。",
+      "mode": "all",
+      "prompt": "{file:./prompts/ctf-master.md}",
+      "permission": {
+        "task": {
+          "*": "deny",
+          "ctf-sliver": "allow"
+        }
+      }
+    },
+    "ctf-sliver": {
+      "description": "CTF 解题执行单元（pwn/web）。接收 CTF-Master 派发的单题任务：本地分析、编写 exploit、产出 flag 或结构化状态报告。",
+      "mode": "subagent",
+      "hidden": true,
+      "prompt": "{file:./prompts/ctf-sliver.md}",
+      "tools": {
+        "aixctf-challenge_submit_flag": false,
+        "aixctf-challenge_start_challenge": false,
+        "aixctf-challenge_stop_challenge": false,
+        "aixctf-challenge_view_hint": false
+      },
+      "permission": {
+        "task": "deny"
+      }
+    }
+  }
+}

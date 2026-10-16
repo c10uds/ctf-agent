@@ -1,0 +1,9 @@
+.git
+.env
+work/
+notes/
+ghidra-projects/
+node_modules/
+*.log
+Dockerfile
+.dockerignore
