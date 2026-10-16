@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # AIxCTF 容器入口：启动即自动运行 CTF-Master 开始比赛
+# 循环策略：1 次全新会话 + 5 次 -c 续跑（保留上下文、省去冷启动对账），
+# 然后丢弃上下文重新开局，防止上下文无限膨胀。
 set -u
 cd /app
 
@@ -31,7 +33,9 @@ if [ "${RUN_ONCE:-0}" = "1" ]; then
   exec opencode run --agent ctf-master --auto "$(cat prompts/kickoff-master.md)"
 fi
 
-DELAY="${MASTER_RESTART_DELAY:-120}"
+CONTINUE_ROUNDS="${MASTER_CONTINUE_ROUNDS:-5}"   # 每个全新会话后续跑次数
+DELAY="${MASTER_RESTART_DELAY:-120}"             # 每大轮（新会话开局）之间的间隔秒数
+
 child=0
 term() {
   echo "[entrypoint] 收到停止信号，退出"
@@ -40,14 +44,28 @@ term() {
 }
 trap term TERM INT
 
-echo "[entrypoint] AIxCTF 自动解题启动：每轮结束后 ${DELAY}s 重启 CTF-Master（断点续打/检查新题）"
-while true; do
-  echo "[entrypoint] $(date -Is) 启动 CTF-Master"
-  opencode run --agent ctf-master --auto "$(cat prompts/kickoff-master.md)" &
+run_master() {  # $1=消息  $2=continue 时续跑最近会话
+  if [ "${2:-}" = "continue" ]; then
+    opencode run --agent ctf-master --auto -c "$1" &
+  else
+    opencode run --agent ctf-master --auto "$1" &
+  fi
   child=$!
-  wait "$child"; rc=$?
-  [ "$rc" -ne 0 ] && echo "[entrypoint] CTF-Master 异常退出（code=$rc）"
-  echo "[entrypoint] 本轮结束，${DELAY}s 后开始下一轮"
+  wait "$child"
+  rc=$?
+  [ "$rc" -ne 0 ] && echo "[entrypoint] CTF-Master 退出码 $rc"
+  return 0
+}
+
+echo "[entrypoint] AIxCTF 自动解题启动：1 新会话 + ${CONTINUE_ROUNDS} 次续跑为一大轮，大轮间隔 ${DELAY}s"
+while true; do
+  echo "[entrypoint] $(date -Is) 开启全新 Master 会话"
+  run_master "$(cat prompts/kickoff-master.md)"
+  for i in $(seq 1 "$CONTINUE_ROUNDS"); do
+    echo "[entrypoint] $(date -Is) 续跑 Master 会话（$i/$CONTINUE_ROUNDS）"
+    run_master "继续答题" continue
+  done
+  echo "[entrypoint] 本大轮结束，${DELAY}s 后开新会话（重置上下文）"
   sleep "$DELAY" & child=$!
   wait "$child"
 done

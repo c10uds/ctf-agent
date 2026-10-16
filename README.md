@@ -75,8 +75,9 @@ docker build -t ctf-agent .
 | `CHALLENGE_API_ENDPOINT` | 是 | 题目服务器 Agent API 端点 |
 | `OPENCODE_MODEL` | 否 | 指定模型，如 `anthropic/claude-sonnet-4-5` |
 | 模型 provider 的 API Key | 是 | 如 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENCODE_API_KEY`，取决于所用 provider |
-| `RUN_ONCE` | 否 | 设为 `1` 时只跑一轮；默认每轮结束后 120s 自动重启 Master（断点续打、检查新题） |
-| `MASTER_RESTART_DELAY` | 否 | 重启间隔秒数，默认 120 |
+| `RUN_ONCE` | 否 | 设为 `1` 时只跑一轮全新会话后退出（调试用） |
+| `MASTER_CONTINUE_ROUNDS` | 否 | 每个全新会话后的 `-c` 续跑次数，默认 5 |
+| `MASTER_RESTART_DELAY` | 否 | 每大轮（全新会话开局）之间的间隔秒数，默认 120 |
 
 ### 推荐：配置文件 + 本地 LLM 网关模式（自包含镜像）
 
@@ -128,7 +129,7 @@ docker run --rm \
 
 说明：
 
-- Master 每轮跑完会自动重启续打（状态在 `state/`、`notes/`、`work/` 文件里，重启不丢进度）；如需跨容器持久化，挂载 `-v ctf-state:/app/state`。
+- Master 循环策略：**1 次全新会话（kickoff 指令）+ 5 次 `-c` 续跑（"继续答题"，保留上下文免冷启动对账）为一大轮**，之后丢弃上下文重新开局防止膨胀，大轮间隔 `MASTER_RESTART_DELAY` 秒；状态在 `state/`、`notes/`、`work/` 文件里，重启不丢进度。如需跨容器持久化，挂载 `-v ctf-state:/app/state`。
 - 容器内用的是 `docker/opencode.json`（Linux 版：无 `cmd /c` 包装，Chrome 无头 + no-sandbox），与本地 Windows 的 `opencode.json` 是两份，**改 agent 定义时两份要同步改**。
 - Chrome 以 `--headless --no-sandbox` 运行（容器内 root 的必要姿势）；Ghidra 12.1.4 已内置并通过 `GHIDRA_INSTALL_DIR=/opt/ghidra` 提供给 pyghidra-mcp。
 
