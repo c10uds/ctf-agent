@@ -51,7 +51,7 @@
 
 ## 其它 MCP
 
-- **ghidra**（pyghidra-mcp，headless）：pwn 二进制反编译/符号/字符串/交叉引用分析。用 `import_binary` 导入后用 `binary_name` 引用。需要环境变量 `GHIDRA_INSTALL_DIR`（容器内已内置）。**批量阅读走本地归档**——`tools/ghidra_export.py` 复用同一 Ghidra 工程把逐函数反编译落盘到 `work/<id>/analysis/`，之后用 read_file/grep 查本地；MCP 只用于交互式查询（`search_code`/`gen_callgraph`/`read_bytes`）与改写（`rename_function`/`set_comment`）。
+- **ghidra**（pyghidra-mcp，headless）：pwn 二进制反编译/符号/字符串/交叉引用分析。用 `import_binary` 导入后用 `binary_name` 引用。需要环境变量 `GHIDRA_INSTALL_DIR`（容器内已内置）。**批量阅读走本地归档**——`tools/ghidra_export.py` 自建独立 Ghidra 工程（`ghidra-export-projects/`，与 MCP 的 `ghidra-projects/` 分开：MCP 全程锁着那个工程）把逐函数反编译落盘到 `work/<id>/analysis/`，之后用 read_file/grep 查本地；MCP 只用于交互式查询（`search_code`/`gen_callgraph`/`read_bytes`）与改写（`rename_function`/`set_comment`）。
 - **chrome**（chrome-devtools-mcp）：web 题的浏览器交互（JS 渲染、前端调试）。需要自定义请求头的访问一律改用 curl/requests。
 
 ## 目录与状态文件协议

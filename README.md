@@ -20,7 +20,7 @@
 
 ## PWN 二进制分析归档
 
-pwn worker 对每个要分析的二进制**分析一次、全部落盘**：先用 ghidra MCP `import_binary` 导入，再用 `tools/ghidra_export.py` 复用同一 Ghidra 工程逐函数反编译到 `work/<id>/analysis/<二进制>/`：
+pwn worker 对每个要分析的二进制**分析一次、全部落盘**：`tools/ghidra_export.py` 自建独立 Ghidra 工程（`ghidra-export-projects/`）导入并分析二进制，逐函数反编译到 `work/<id>/analysis/<二进制>/`：
 
 ```
 analysis/<二进制>/
@@ -37,6 +37,8 @@ python3 tools/ghidra_export.py --binary main --binary-path artifacts/main --out 
 ```
 
 之后一切阅读/检索都走本地文件（`read_file`/`grep`），**不把大段反编译经 MCP 灌进上下文**，上下文被重置（`-c` 续跑 / 容器重启）也不丢分析；ghidra MCP 保留用于语义搜索、调用图、读内存、改命名/注释等交互。**分析哪些二进制由 worker 自行判断**（至少主程序；libc/ld 等只在需要算偏移时才归档）。`tools/archive_challenge.sh <题目目录>` 做惰性辅助：解压附件并列出 ELF 候选，不自动归档。
+
+> 注意：归档脚本**不能复用 ghidra MCP 的工程**——MCP 服务器在整个会话期间持有 `ghidra-projects/` 的锁，并发打开会抛 Java 异常；两者各用各的工程目录（归档用 `ghidra-export-projects/`）。
 
 ## 安装准备
 

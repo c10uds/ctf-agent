@@ -56,7 +56,7 @@ RUN uv tool install --python /usr/bin/python3 pyghidra-mcp && pyghidra-mcp --hel
 # 含 pyghidra：归档脚本 tools/ghidra_export.py 用它打开 Ghidra 工程逐函数导出
 RUN python3 -m venv /opt/ctf-venv \
     && /opt/ctf-venv/bin/pip install --no-cache-dir \
-       pwntools checksec.py ROPgadget ropper requests websocket-client pyghidra
+       pwntools checksec.py ROPgadget ropper requests websocket-client pyghidra==3.1.0
 
 # ---- Ruby pwn 工具（GEM_SOURCE 可在 rubygems.org 不可达时指定镜像）----
 ARG GEM_SOURCE=""

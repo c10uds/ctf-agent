@@ -4,10 +4,9 @@
 目的：一次分析、全部落盘，后续直接 read_file / grep 本地文件，避免把大段反编译内容
 经 ghidra MCP 灌进模型上下文；上下文被重置（-c 续跑 / 容器重启）也不丢分析。
 
-复用 pyghidra-mcp 的 Ghidra 工程：worker 的 cwd 就是题目目录 work/<id>/，而 ghidra MCP
-用相对路径 --project-path ghidra-projects 启动，故工程落在 <cwd>/ghidra-projects。
-若该 program 已由 MCP 的 import_binary 导入，本脚本直接打开复用、不重复分析；
-工程里没有时用 --binary-path 指向的二进制文件导入并分析。
+本工具**自建独立 Ghidra 工程**（默认 ./ghidra-export-projects）导入并分析二进制：
+ghidra MCP 的工程（./ghidra-projects）在整个会话期间被 MCP 服务器加锁，无法并发打开，
+因此不能复用；二进制由 --binary-path 指定，可见 ghidra MCP 与本地归档各用各的工程。
 
 用法：
   python3 tools/ghidra_export.py --binary main --binary-path artifacts/main \\
@@ -23,9 +22,11 @@
   <out>/src/<函数名>.c   逐函数反编译（文件名=函数名，非法字符已清洗、重名加地址后缀）
 """
 import argparse
+import os
 import re
 import sys
 import time
+import warnings
 from pathlib import Path
 
 INVALID_FS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -86,29 +87,23 @@ def func_names(functions) -> str:
 def open_program_ctx(args):
     import pyghidra
 
-    common = dict(
-        project_location=args.project,
-        project_name=args.project_name,
-        nested_project_location=False,
-    )
-    # 1) 优先打开工程里已导入的同名 program（MCP import_binary 的产物），不重复分析
-    try:
-        return pyghidra.open_program(
-            binary_path=None, program_name=args.binary, analyze=False, **common
-        )
-    except Exception as exc:
-        print(f"[ghidra_export] 复用工程内 program 失败：{exc}", file=sys.stderr)
     if not args.binary_path:
-        raise SystemExit(
-            f"工程内没有 program '{args.binary}'，且未提供 --binary-path，无法继续"
-        )
-    # 2) 回退：从二进制文件导入并分析
-    print(f"[ghidra_export] 改为导入并分析 {args.binary_path}", file=sys.stderr)
+        raise SystemExit("必须提供 --binary-path（本工具自建工程、自行导入分析）")
+    if not os.path.isfile(args.binary_path):
+        raise SystemExit(f"找不到二进制文件：{args.binary_path}")
+
+    # 不要复用 ghidra MCP 的工程：MCP 服务器在整个会话期间一直持有该项目（my_project.lock），
+    # 并发 openProject 会直接抛 Java Exception。因此本工具使用独立工程目录，自行导入+分析。
+    print(f"[ghidra_export] 导入并分析 {args.binary_path}（工程 {args.project}）", file=sys.stderr)
+    # pyghidra 3.x 把 open_program 标为 deprecated（仍可用且行为稳定），这里静音避免污染 worker 输出
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
     return pyghidra.open_program(
         binary_path=args.binary_path,
+        project_location=args.project,
+        project_name=args.project_name,
         program_name=args.binary,
         analyze=True,
-        **common,
+        nested_project_location=False,
     )
 
 
@@ -322,8 +317,9 @@ def parse_args():
     ap.add_argument("--binary", required=True, help="program 名 / 输出子目录名（建议用二进制文件名）")
     ap.add_argument("--binary-path", help="二进制文件路径（工程内没有该 program 时导入用）")
     ap.add_argument("--out", required=True, help="输出目录，如 work/42/analysis/main")
-    ap.add_argument("--project", default="ghidra-projects",
-                    help="Ghidra 工程目录（默认 ghidra-projects，与 ghidra MCP 一致）")
+    ap.add_argument("--project", default="ghidra-export-projects",
+                    help="本工具自己的 Ghidra 工程目录（默认 ghidra-export-projects；"
+                         "不要指向 ghidra MCP 的 ghidra-projects，那里被 MCP 长期加锁）")
     ap.add_argument("--project-name", default="my_project", help="Ghidra 工程名（默认 my_project）")
     ap.add_argument("--lazy", action="store_true", help="只出 metadata/functions/strings/imports，不逐函数反编译")
     ap.add_argument("--min-size", type=int, default=0, help="小于该字节数的函数不反编译（默认 0）")

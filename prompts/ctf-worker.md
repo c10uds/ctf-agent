@@ -55,12 +55,12 @@ summary: <三行以内：做了什么、卡在哪、下一步>
    curl -sSL -H "Authorization: Bearer $TEAM_AGENT_KEY" "$CHALLENGE_API_ENDPOINT<download_url>" -o artifacts/<文件名>
    ```
 2. 本地侦察：附件是压缩包先 `bash /app/tools/archive_challenge.sh .`（解压到 `artifacts/extracted/` 并列出 ELF 候选）；再 `file`、`checksec --file=`、`strings`、`readelf`、`objdump`。**要分析哪些二进制由你自己判断**——至少主程序；需要算偏移/看沙箱时才管 libc/ld。
-3. **ghidra MCP 导入**：`list_project_binaries` 查是否已导入，没有就 `import_binary`（传二进制的**绝对路径**，如 `/app/work/<id>/artifacts/xxx`）。
+3. **ghidra MCP 导入**（可选，用于交互式分析）：`list_project_binaries` 查是否已导入，没有就 `import_binary`（传二进制的**绝对路径**，如 `/app/work/<id>/artifacts/xxx`）。
 4. **一次性归档到本地**（核心：分析一次、全部落盘，之后都读本地）：
    ```bash
    python3 /app/tools/ghidra_export.py --binary <名字> --binary-path artifacts/<名字> --out analysis/<名字>
    ```
-   它复用 MCP 已导入的**同一个 Ghidra 工程**（不重复分析），把每个函数反编译成 `analysis/<名字>/src/<函数名>.c`，并生成 `INDEX.md` / `functions.txt` / `strings.txt` / `imports.txt` / `metadata.txt`。**归档后先读 `analysis/<名字>/INDEX.md`**，再用 `read_file`（可 offset/limit）与 `grep` 在 `src/` 里定位漏洞。上下文被重置也不丢分析。
+   它**自建独立 Ghidra 工程**（`ghidra-export-projects/`，与 ghidra MCP 的 `ghidra-projects/` 分开——MCP 全程锁着那个工程，不能共用），自行导入+分析，把每个函数反编译成 `analysis/<名字>/src/<函数名>.c`，并生成 `INDEX.md` / `functions.txt` / `strings.txt` / `imports.txt` / `metadata.txt`。**归档后先读 `analysis/<名字>/INDEX.md`**，再用 `read_file`（可 offset/limit）与 `grep` 在 `src/` 里定位漏洞。上下文被重置也不丢分析。
 5. **本地文件优先，MCP 只用于交互**：批量阅读/检索一律走 `analysis/`；只有需要语义搜索（`search_code`）、调用图（`gen_callgraph`）、读内存（`read_bytes`）、改命名/注释（`rename_function`/`set_comment`）或临时看一个还没归档的二进制时，才回落 ghidra MCP。**禁止把大段反编译结果经 MCP 读进上下文。**
 6. 判型：栈溢出 / 堆（UAF、double free、tcache poisoning…）/ 格式化字符串 / 整数溢出 / 栈迁移 / SROP / ret2libc / 沙箱 ORW 等，结合 CANARY/NX/PIE/RELRO 定方案。
 7. pwntools 写 `exploit.py`（shebang `#!/usr/bin/env python3`，venv 已在 PATH）。**本地验证**：`process()` 跑通（有 libc/ld 就 LD_PRELOAD 或 patchelf）；控制 RIP / 读到预期数据即算通过。

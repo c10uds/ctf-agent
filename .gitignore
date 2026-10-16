@@ -7,12 +7,17 @@ gateway/gateway.config.json
 work/
 notes/
 ghidra-projects/
+ghidra-export-projects/
 *.log
 
 # 观测面板运行时产物
 gateway/logs/
 dashboard/node_modules/
 dashboard/dist/
+
+# 评测题产物（libc/ld 由 challenges/setup.sh 从构建机拷入）
+challenges/pwn/*/dist/*.so*
+challenges/platform/tmp/
 
 # Python
 __pycache__/
