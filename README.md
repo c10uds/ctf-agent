@@ -5,17 +5,18 @@
 ## 架构
 
 ```
-用户 ⇄ CTF-Customer（默认 agent，聊天/汇报/接收指令）
-         │  写入 state/REQUESTS.md 或 Task 调起
+用户 ⇄ CTF-Customer（本地默认 agent，聊天/汇报/接收指令）
+         │  写入 state/REQUESTS.md
          ▼
-      CTF-Master（总指挥：全局状态、派发任务、管理环境与提交）
-         │  Task 并行派发
+      CTF-Master（容器内常驻：全局状态、环境仲裁、进程调度）
+         │  进程编排：cd work/<id>/ && nohup opencode run --agent ctf-worker ... &
          ▼
-      CTF-Sliver × N（单题解题：本地分析 → 远程打 → 报告 flag）
+      CTF-Worker × N（每题一个目录、一个持续会话，-c 续跑；自行提交 flag）
 ```
 
+- 进程编排而非 Task 子代理：worker 是独立 opencode 进程，每题一个 `work/<id>/` 目录，会话按目录隔离、`-c` 续跑保持上下文连续；Master 后台派发后靠轮询 `run.log`（`WORKER-REPORT` 状态块）掌握进度。
+- 环境仲裁：worker 通过 `state/env-requests/<id>.req` 申请环境，Master 独占 start/stop，pwn 抢占 web、短借短还（详见 AGENTS.md）。
 - 角色提示词在 `prompts/`，agent 与 MCP 配置在 `opencode.json`，共享协议在 `AGENTS.md`。
-- 协作通过 `state/` 下的状态文件完成，互不越权（详见 AGENTS.md）。
 
 ## 安装准备
 
@@ -36,7 +37,7 @@
 **终端 1 —— 总指挥（自动解题主循环）：**
 
 ```bash
-opencode run --agent ctf-master "$(cat prompts/kickoff-master.md)"
+opencode run --agent ctf-master --auto "$(cat prompts/kickoff-master.md)"
 ```
 
 **终端 2 —— 用户接口（与 CTF-Customer 聊天、看进度、下指令）：**
@@ -45,7 +46,7 @@ opencode run --agent ctf-master "$(cat prompts/kickoff-master.md)"
 opencode        # 默认 agent 即 ctf-customer
 ```
 
-单终端用法：直接运行 `opencode`，与 ctf-customer 对话让它用 Task 调起 ctf-master（调起期间该会话会等待 Master 跑完一轮才返回）。TUI 内可用 Tab 切换 agent、`@ctf-sliver` 手动点名子代理。
+单终端用法：直接运行 `opencode` 与 ctf-customer 对话（它只读写状态文件，不调度）；Master 建议在独立终端跑。TUI 内可用 Tab 切换 agent。
 
 ## Docker 部署（平台评测）
 
@@ -129,7 +130,7 @@ docker run --rm \
 
 说明：
 
-- Master 循环策略：**1 次全新会话（kickoff 指令）+ 5 次 `-c` 续跑（"继续答题"，保留上下文免冷启动对账）为一大轮**，之后丢弃上下文重新开局防止膨胀，大轮间隔 `MASTER_RESTART_DELAY` 秒；状态在 `state/`、`notes/`、`work/` 文件里，重启不丢进度。如需跨容器持久化，挂载 `-v ctf-state:/app/state`。
+- Master 循环策略：**1 次全新会话（kickoff 指令）+ 5 次 `-c` 续跑（"继续答题"，保留上下文免冷启动对账）为一大轮**，之后丢弃上下文重新开局防止膨胀，大轮间隔 `MASTER_RESTART_DELAY` 秒；状态在 `state/`、`work/` 文件里，重启不丢进度。如需跨容器持久化，挂载 `-v ctf-state:/app/state -v ctf-work:/app/work`。
 - 容器内用的是 `docker/opencode.json`（Linux 版：无 `cmd /c` 包装，Chrome 无头 + no-sandbox），与本地 Windows 的 `opencode.json` 是两份，**改 agent 定义时两份要同步改**。
 - Chrome 以 `--headless --no-sandbox` 运行（容器内 root 的必要姿势）；Ghidra 12.1.4 已内置并通过 `GHIDRA_INSTALL_DIR=/opt/ghidra` 提供给 pyghidra-mcp。
 
@@ -137,7 +138,7 @@ docker run --rm \
 
 - 对 Customer 说："现在进度如何" / "优先做 web 第 8 题" / "授权查看第 12 题提示"（会告知 80% 扣分后果）/ "pwn 并行数提到 5 个"。
 - 所有指令进入 `state/REQUESTS.md`，Master 每轮主循环开始时执行。
-- 想看原始状态：直接翻 `state/SCOREBOARD.md`、`state/ENVIRONMENTS.md`、`notes/`。
+- 想看原始状态：直接翻 `state/SCOREBOARD.md`、`state/ENVIRONMENTS.md`、`state/env-requests/`（环境申请队列）、`work/<id>/notes.md`（各题笔记）与 `work/<id>/run.log`（worker 实时日志）。
 
 ## 排错
 

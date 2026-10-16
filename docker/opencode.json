@@ -1,7 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "default_agent": "ctf-customer",
-  "subagent_depth": 2,
   "share": "disabled",
   "autoupdate": false,
   "permission": {
@@ -44,30 +43,22 @@
         "aixctf-challenge_view_hint": false
       },
       "permission": {
-        "task": {
-          "*": "deny",
-          "ctf-master": "allow"
-        }
+        "task": "deny"
       }
     },
     "ctf-master": {
-      "description": "CTF 比赛总指挥。维护全局状态，派发任务给 ctf-sliver 并行解题，统一管理动态环境与 flag 提交。",
-      "mode": "all",
+      "description": "CTF 比赛总指挥。维护全局状态，以独立进程方式派发/续跑 ctf-worker，统一仲裁动态环境。",
+      "mode": "primary",
       "prompt": "{file:./prompts/ctf-master.md}",
       "permission": {
-        "task": {
-          "*": "deny",
-          "ctf-sliver": "allow"
-        }
+        "task": "deny"
       }
     },
-    "ctf-sliver": {
-      "description": "CTF 解题执行单元（pwn/web）。接收 CTF-Master 派发的单题任务：本地分析、编写 exploit、产出 flag 或结构化状态报告。",
-      "mode": "subagent",
-      "hidden": true,
-      "prompt": "{file:./prompts/ctf-sliver.md}",
+    "ctf-worker": {
+      "description": "CTF 解题专家（pwn/web）。在题目专属目录 work/<id>/ 中以持续会话工作：本地分析、写 exploit、远程攻击并提交 flag。",
+      "mode": "primary",
+      "prompt": "{file:./prompts/ctf-worker.md}",
       "tools": {
-        "aixctf-challenge_submit_flag": false,
         "aixctf-challenge_start_challenge": false,
         "aixctf-challenge_stop_challenge": false,
         "aixctf-challenge_view_hint": false
