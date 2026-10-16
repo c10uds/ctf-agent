@@ -29,10 +29,12 @@
 ## 环境申请与抢占协议
 
 - worker **禁止**调用 `start_challenge`/`stop_challenge`（配置层禁用）。需要环境时：写申请文件 `state/env-requests/<id>.req`（challenge_id/category/type/requested_at）→ 输出 WORKER-REPORT → 结束本轮，**不原地等待**。
+- 被抢占的 web 题由 Master 代写同名 `.req`（多一个 `preempted_at` 字段）重新入队，见下方抢占协议。
 - Master 步骤级轮询 `env-requests/`（每做一两个动作查一次），批准后 `-c` 续跑 worker 并附连接信息，同时删除申请文件。
 - 环境台账 `state/ENVIRONMENTS.md` 由 Master 维护（当前持有者、启动时间、用途）；队列真相以 `env-requests/` 目录为准。
-- **抢占规则**：pwn 的 LOCAL_READY 申请优先于进行中的 web；web 被打断时先等其当前轮结束，超过 `ENV_PREEMPT_GRACE`（默认 300s）杀进程强收。
-- **持有预算**：worker 持环境默认最长 `ENV_HOLD_BUDGET`（默认 600s），超时 Master 杀 worker、收环境、该题回 ANALYZING 重新排队。
+- **抢占规则**：pwn 的 LOCAL_READY 申请优先于进行中的 web；web 被打断时先等其当前轮结束，超过 `ENV_PREEMPT_GRACE`（默认 300s）杀进程强收。环境只在"本地已就绪、就差远程执行"时才申请；pwn 远程打不通应归还环境回本地继续调试（而非攥着环境或频繁重申请），因此天然不会持续抢占 web。
+- **被抢占恢复（恢复优先级最高）**：抢占 web 时，Master 除把该题标回 ANALYZING 外，**必须代写 `state/env-requests/<id>.req`（追加 `preempted_at` 字段）把它重新入队**，否则它就成了一道没人认领的孤儿题。环境归还后的分配优先级固定为：**抢占恢复（含 `preempted_at` 的申请，多条按 `preempted_at` 先等先恢复）> 普通申请队列（FIFO）> 新 web 题**——保证被打断的 web 题一定拿回环境，不被新题饿死。
+- **持有预算**：pwn 持环境默认最长 `ENV_HOLD_BUDGET`（默认 600s），超时 Master 杀 worker、收环境、该题回 ANALYZING 重新排队；**web 持环境不限时**（web 解题耗时远超 600s），仅在 pwn 申请抢占或 worker 自行归还时才释放。web 被 pwn 抢占后不会被丢弃：按"被抢占恢复"把环境还给它。
 
 ## 平台 MCP（aixctf-challenge）使用规范
 
@@ -49,7 +51,7 @@
 
 ## 其它 MCP
 
-- **ghidra**（pyghidra-mcp，headless）：pwn 二进制反编译/符号/字符串/交叉引用分析。用 `import_binary` 导入后用 `binary_name` 引用。需要环境变量 `GHIDRA_INSTALL_DIR`（容器内已内置）。
+- **ghidra**（pyghidra-mcp，headless）：pwn 二进制反编译/符号/字符串/交叉引用分析。用 `import_binary` 导入后用 `binary_name` 引用。需要环境变量 `GHIDRA_INSTALL_DIR`（容器内已内置）。**批量阅读走本地归档**——`tools/ghidra_export.py` 复用同一 Ghidra 工程把逐函数反编译落盘到 `work/<id>/analysis/`，之后用 read_file/grep 查本地；MCP 只用于交互式查询（`search_code`/`gen_callgraph`/`read_bytes`）与改写（`rename_function`/`set_comment`）。
 - **chrome**（chrome-devtools-mcp）：web 题的浏览器交互（JS 渲染、前端调试）。需要自定义请求头的访问一律改用 curl/requests。
 
 ## 目录与状态文件协议
@@ -59,20 +61,22 @@
 │   ├── SCOREBOARD.md      # 题目总表，Master 维护
 │   ├── ENVIRONMENTS.md    # 环境台账，Master 维护
 │   ├── REQUESTS.md        # 用户指令队列，Customer 写入，Master 读取并标记完成
-│   └── env-requests/      # 环境申请队列，worker 写 <id>.req，Master 批准后删除
+│   └── env-requests/      # 环境申请队列，worker 写 <id>.req（被抢占的 web 题由 Master 代写，附 preempted_at），Master 批准后删除
 ├── work/<id>/             # 每题一个工作区（worker 的 cwd，会话按目录隔离）
 │   ├── dispatch.md        # Master 写的任务书
 │   ├── run.log            # worker 进程日志（Master 轮询解析 WORKER-REPORT）
 │   ├── worker.pid         # worker 进程 pid
 │   ├── notes.md           # worker 笔记（过程/发现/下一步）
-│   ├── artifacts/         # 原始附件
+│   ├── artifacts/         # 原始附件（压缩包解压到 extracted/）
+│   ├── analysis/          # 二进制分析归档（tools/ghidra_export.py 产物，按二进制分子目录，函数文件在 src/）
 │   └── output/            # 大输出文件
 ├── prompts/               # 三个角色的系统提示词 + kickoff
+├── tools/                 # 工具脚本（ghidra_export.py 归档、archive_challenge.sh 解压）
 └── opencode.json          # agent 与 MCP 配置
 ```
 
 - `SCOREBOARD.md` 状态枚举：`TODO / ANALYZING / LOCAL_READY / ENV_QUEUED / ATTACKING / SOLVED / BLOCKED / STUCK / SKIP`。
-- 写入归属：SCOREBOARD/ENVIRONMENTS 只有 Master 写；REQUESTS 只有 Customer 写、Master 标记；env-requests 谁申请谁写、Master 删；work/<id>/ 归该题 worker。
+- 写入归属：SCOREBOARD/ENVIRONMENTS 只有 Master 写；REQUESTS 只有 Customer 写、Master 标记；env-requests 默认 worker 写、Master 删，被抢占的 web 题由 Master 代写入队；work/<id>/ 归该题 worker。
 - 每个写操作保持**追加优先**，不要整表重写覆盖他人刚写的内容。
 
 ## 得分规则（来自平台文档）

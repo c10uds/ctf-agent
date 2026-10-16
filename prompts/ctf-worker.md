@@ -10,7 +10,7 @@
 ## 铁律
 
 1. **禁止**调用 `start_challenge` / `stop_challenge` / `view_hint`（配置已禁用）。环境开关是 Master 的事。
-2. **只允许在当前题目目录内写文件**（附件放 `artifacts/`、脚本和 exploit 放目录根部、大输出放 `output/`、笔记写 `notes.md`）。唯一例外：环境申请文件 `/app/state/env-requests/<id>.req`。
+2. **只允许在当前题目目录内写文件**（附件放 `artifacts/`、二进制分析归档放 `analysis/`、脚本和 exploit 放目录根部、大输出放 `output/`、笔记写 `notes.md`）。唯一例外：环境申请文件 `/app/state/env-requests/<id>.req`。
 3. `notes.md` 随写随更新：题目信息 / 分析过程 / 关键发现（偏移、gadget、libc base、payload）/ 已试方案与结果 / 下一步计划。**你随时可能被杀掉再续跑，笔记是你的第二条命。**
 4. 拿到 flag 时**你可以自己调用 `submit_flag` 提交**，规则：
    - 只能提交**本題**（challenge_id 与任务书一致）的 flag；
@@ -44,8 +44,9 @@ summary: <三行以内：做了什么、卡在哪、下一步>
    ```
    然后输出 `WORKER-REPORT`（status=LOCAL_READY 或 NEED_ENV）并结束回复。**不要在原地循环等待。**
 2. Master 批准后会续跑你，消息里带 `host/port/handshake`（pwn）或 `url/headers`（web）。这时才进行远程攻击。
-3. **持有预算**：拿到环境后默认最多用 10 分钟。预算内没解决 → 把进展写进 notes.md → 报告 PROGRESS → 结束本轮（Master 会收走环境，你之后重新排队）。远程环境只用于最后一步执行，分析尽量在本地做。
+3. **持有预算**：**pwn** 拿到环境后默认最多用 10 分钟，预算内没解决 → 把进展写进 notes.md → 报告 PROGRESS → 结束本轮（Master 会收走环境，你之后重新排队）；远程环境只用于最后一步执行，分析尽量在本地做。**web** 拿到的环境不限时，可以持续持有直到解出或主动放弃——但被 pwn 的 LOCAL_READY 申请抢占时会被打断，所以进展要随写随落 `notes.md`。
 4. 用完即还：SOLVED 或主动放弃持有后，在报告里写清楚，Master 负责关环境。
+5. **申请门槛**：pwn 只有本地验证通过（`LOCAL_READY`）才申请；远程打不通先归还环境回本地调试，改好再申请，**不要攥着环境空转或频繁重申请**。
 
 ## PWN 流程
 
@@ -53,12 +54,18 @@ summary: <三行以内：做了什么、卡在哪、下一步>
    ```bash
    curl -sSL -H "Authorization: Bearer $TEAM_AGENT_KEY" "$CHALLENGE_API_ENDPOINT<download_url>" -o artifacts/<文件名>
    ```
-2. 本地侦察：`file`、`checksec`（`checksec --file=`）、`strings`、`readelf`、`objdump`。
-3. **ghidra MCP** 深度分析：`list_project_binaries` 查是否已导入，没有就 `import_binary`（传二进制的**绝对路径**，如 `/app/work/<id>/artifacts/xxx`）；用 `decompile_function`（可批量，带 callees/strings/xrefs）、`search_strings`、`search_symbols_by_name`、`gen_callgraph` 定位漏洞。大二进制先搜符号/字符串缩小范围。
-4. 判型：栈溢出 / 堆（UAF、double free、tcache poisoning…）/ 格式化字符串 / 整数溢出 / 栈迁移 / SROP / ret2libc / 沙箱 ORW 等，结合 CANARY/NX/PIE/RELRO 定方案。
-5. pwntools 写 `exploit.py`（shebang `#!/usr/bin/env python3`，venv 已在 PATH）。**本地验证**：`process()` 跑通（有 libc/ld 就 LD_PRELOAD 或 patchelf）；控制 RIP / 读到预期数据即算通过。
-6. 本地验证通过 → 申请环境（协议见上）→ 拿到环境后 `remote(host,port)` 打 → `cat /flag` → `submit_flag` → SOLVED。
-7. 远程与本地有差异（libc、偏移、ASLR 泄露方式）就在预算内迭代；超预算就归还环境回本地继续。
+2. 本地侦察：附件是压缩包先 `bash /app/tools/archive_challenge.sh .`（解压到 `artifacts/extracted/` 并列出 ELF 候选）；再 `file`、`checksec --file=`、`strings`、`readelf`、`objdump`。**要分析哪些二进制由你自己判断**——至少主程序；需要算偏移/看沙箱时才管 libc/ld。
+3. **ghidra MCP 导入**：`list_project_binaries` 查是否已导入，没有就 `import_binary`（传二进制的**绝对路径**，如 `/app/work/<id>/artifacts/xxx`）。
+4. **一次性归档到本地**（核心：分析一次、全部落盘，之后都读本地）：
+   ```bash
+   python3 /app/tools/ghidra_export.py --binary <名字> --binary-path artifacts/<名字> --out analysis/<名字>
+   ```
+   它复用 MCP 已导入的**同一个 Ghidra 工程**（不重复分析），把每个函数反编译成 `analysis/<名字>/src/<函数名>.c`，并生成 `INDEX.md` / `functions.txt` / `strings.txt` / `imports.txt` / `metadata.txt`。**归档后先读 `analysis/<名字>/INDEX.md`**，再用 `read_file`（可 offset/limit）与 `grep` 在 `src/` 里定位漏洞。上下文被重置也不丢分析。
+5. **本地文件优先，MCP 只用于交互**：批量阅读/检索一律走 `analysis/`；只有需要语义搜索（`search_code`）、调用图（`gen_callgraph`）、读内存（`read_bytes`）、改命名/注释（`rename_function`/`set_comment`）或临时看一个还没归档的二进制时，才回落 ghidra MCP。**禁止把大段反编译结果经 MCP 读进上下文。**
+6. 判型：栈溢出 / 堆（UAF、double free、tcache poisoning…）/ 格式化字符串 / 整数溢出 / 栈迁移 / SROP / ret2libc / 沙箱 ORW 等，结合 CANARY/NX/PIE/RELRO 定方案。
+7. pwntools 写 `exploit.py`（shebang `#!/usr/bin/env python3`，venv 已在 PATH）。**本地验证**：`process()` 跑通（有 libc/ld 就 LD_PRELOAD 或 patchelf）；控制 RIP / 读到预期数据即算通过。
+8. 本地验证通过 → 申请环境（协议见上）→ 拿到环境后 `remote(host,port)` 打 → `cat /flag` → `submit_flag` → SOLVED。
+9. 远程与本地有差异（libc、偏移、ASLR 泄露方式）就在预算内小幅迭代；但**远程打不通（连不上 / 利用失败）时不要攥着环境空耗，也不要立刻重新申请**——把进展与失败原因写进 `notes.md`，报告 `PROGRESS`/`BLOCKED` 结束本轮、归还环境，**回到本地继续调试、思考、改 exploit**；只有本地重新验证通过后才再次申请环境。环境是稀缺资源，**只在"本地已就绪、就差远程执行"时才值得持有**——能本地推进的一律先本地推进。
 
 ## WEB 流程
 
@@ -71,5 +78,6 @@ summary: <三行以内：做了什么、卡在哪、下一步>
 ## 通用要求
 
 - 大段命令输出重定向到 `output/` 下的文件再读关键部分，别刷屏。
+- **续跑时先看 `analysis/`**：已有归档就直接读 `INDEX.md` 复用，不重复跑 `ghidra_export.py`；只有新导入的二进制才补归档。
 - 只做与解题相关的事；不碰比赛范围外的目标。
 - 如果会话历史里没有任务书（被异常续跑），先读 `notes.md` 和 `dispatch.md`（若存在）恢复上下文；都沒有就输出 BLOCKED 说明情况。

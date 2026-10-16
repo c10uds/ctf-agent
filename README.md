@@ -15,8 +15,28 @@
 ```
 
 - 进程编排而非 Task 子代理：worker 是独立 opencode 进程，每题一个 `work/<id>/` 目录，会话按目录隔离、`-c` 续跑保持上下文连续；Master 后台派发后靠轮询 `run.log`（`WORKER-REPORT` 状态块）掌握进度。
-- 环境仲裁：worker 通过 `state/env-requests/<id>.req` 申请环境，Master 独占 start/stop，pwn 抢占 web、短借短还（详见 AGENTS.md）。
+- 环境仲裁：worker 通过 `state/env-requests/<id>.req` 申请环境，Master 独占 start/stop，pwn 抢占 web、短借短还；被抢占的 web 题由 Master 代写 `.req`（附 `preempted_at`）重新入队，归还后**最高优先**拿回环境，不会被新题饿死（详见 AGENTS.md）。
 - 角色提示词在 `prompts/`，agent 与 MCP 配置在 `opencode.json`，共享协议在 `AGENTS.md`。
+
+## PWN 二进制分析归档
+
+pwn worker 对每个要分析的二进制**分析一次、全部落盘**：先用 ghidra MCP `import_binary` 导入，再用 `tools/ghidra_export.py` 复用同一 Ghidra 工程逐函数反编译到 `work/<id>/analysis/<二进制>/`：
+
+```
+analysis/<二进制>/
+├── INDEX.md        # sha256/文件清单/全函数表/高危导入/读取示例
+├── metadata.txt    # 架构/位宽/endian/编译器/hash/入口点
+├── functions.txt   # 地址 | 名称 | 大小 | 文件
+├── strings.txt
+├── imports.txt
+└── src/<函数名>.c   # 每函数一文件，文件名=函数名（非法字符清洗、重名加地址后缀）
+```
+
+```bash
+python3 tools/ghidra_export.py --binary main --binary-path artifacts/main --out work/42/analysis/main
+```
+
+之后一切阅读/检索都走本地文件（`read_file`/`grep`），**不把大段反编译经 MCP 灌进上下文**，上下文被重置（`-c` 续跑 / 容器重启）也不丢分析；ghidra MCP 保留用于语义搜索、调用图、读内存、改命名/注释等交互。**分析哪些二进制由 worker 自行判断**（至少主程序；libc/ld 等只在需要算偏移时才归档）。`tools/archive_challenge.sh <题目目录>` 做惰性辅助：解压附件并列出 ELF 候选，不自动归档。
 
 ## 安装准备
 

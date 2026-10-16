@@ -96,12 +96,20 @@ grep -A8 '===WORKER-REPORT===' work/<id>/run.log | tail -20   # 死了 → 解�
 | --- | --- |
 | 空闲 | `start_challenge` 开该题环境 → 登记 ENVIRONMENTS.md → 续跑 worker 附带连接信息 → SCOREBOARD 标 ATTACKING → 删 .req |
 | 被另一 pwn 占用（ATTACKING） | 排队（FIFO），占用方归还后立即分配 |
-| 被 web 占用 | **温和抢占**：等 web worker 当前轮自然结束（笔记已落盘），超过 `ENV_PREEMPT_GRACE`（默认 300s）未结束就 `kill <pid>` 强收 → `stop_challenge` → 该 web 题标回 ANALYZING 并注记"被 <id> 打断" → 分配给申请方 |
+| 被 web 占用 | **温和抢占**：等 web worker 当前轮自然结束（笔记已落盘），超过 `ENV_PREEMPT_GRACE`（默认 300s）未结束就 `kill <pid>` 强收 → `stop_challenge` → 该 web 题标回 ANALYZING 并注记"被 <id> 打断" → **代写 `state/env-requests/<web-id>.req`（附 `preempted_at`）把它重新入队**（否则它就成了没人认领的孤儿题）→ 分配给申请方 |
 | 同题已有环境 | 不重复开，直接续跑附带连接信息 |
 
-**持有预算**：worker 持环境默认最长 `ENV_HOLD_BUDGET`（默认 600s）。到点未 SOLVED：杀掉 worker 进程 → `stop_challenge` → 该题回 ANALYZING（笔记里有进展）→ 服务队列下一个。
+**申请门槛**：环境只批给"本地已就绪、就差远程执行"的题——pwn 的申请应以 `LOCAL_READY`（本地验证通过）为前提。pwn 远程打不通时应归还环境回本地继续调试，因此不会反复抢占 web，无需为此做额外节流。
 
-**归还后**：环境一空，先看队列；队列空了才按分值序派 web 题占环境。
+**持有预算**：**pwn** 持环境默认最长 `ENV_HOLD_BUDGET`（默认 600s），到点未 SOLVED：杀掉 worker 进程 → `stop_challenge` → 该题回 ANALYZING（笔记里有进展）→ 服务队列下一个。**web 持环境不限时**——web 解题耗时远超 600s，绝不因时间到点收走 web 环境；只有两种情况释放：worker 自行归还（SOLVED / 主动放弃），或有 pwn 的 LOCAL_READY 申请抢占。
+
+**归还后（环境一空的分配优先级，固定如下）**：
+
+1. **抢占恢复最高优先**：`ls state/env-requests/` 里若存在带 `preempted_at` 的申请，先把环境还给这道被抢占的 web 题——`start_challenge` 重开环境 → 续跑其 worker（附 url/headers）→ SCOREBOARD 标 ATTACKING → 删 `.req`。多条恢复申请按 `preempted_at` 先等先恢复。**绝不让新题插到它前面，也绝不把它饿死。**
+2. 否则按上表处理普通申请队列（FIFO）。
+3. 都没有，才按分值序派下一道新 web 题占环境。
+
+> 注：pwn 的 LOCAL_READY 抢占优先级不变——恢复中的 web 若又被 pwn 申请抢占，仍按上表抢占，但**必须再次代写 `.req`（刷新 `preempted_at`）**，保证它下次归还时仍第一优先拿回环境。
 
 ## 工作循环（每个动作都是短步骤）
 
@@ -109,7 +117,7 @@ grep -A8 '===WORKER-REPORT===' work/<id>/run.log | tail -20   # 死了 → 解�
 2. 读 REQUESTS.md 处理新指令；
 3. 轮询进行中 worker 的 pid 与 run.log，处理报告；
 4. 有空闲并行额度且还有 TODO pwn 题 → 派发新 worker；
-5. 环境空闲且无队列 → 派下一道 web 题；
+5. 环境空闲 → 先恢复被抢占的 web 题（`env-requests/` 里带 `preempted_at` 的），其次处理普通申请队列，再次才派新 web 题；
 6. 全部 SOLVED/STUCK → 汇总战报写入 SCOREBOARD 并输出，此后定期 `list_challenges` 检查新题。
 
 ## 其它规则

@@ -53,9 +53,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 RUN uv tool install --python /usr/bin/python3 pyghidra-mcp && pyghidra-mcp --help >/dev/null
 
 # ---- Python pwn 工具链（venv 已前置到 PATH，exploit 直接用 python3 跑）----
+# 含 pyghidra：归档脚本 tools/ghidra_export.py 用它打开 Ghidra 工程逐函数导出
 RUN python3 -m venv /opt/ctf-venv \
     && /opt/ctf-venv/bin/pip install --no-cache-dir \
-       pwntools checksec.py ROPgadget ropper requests websocket-client
+       pwntools checksec.py ROPgadget ropper requests websocket-client pyghidra
 
 # ---- Ruby pwn 工具（GEM_SOURCE 可在 rubygems.org 不可达时指定镜像）----
 ARG GEM_SOURCE=""
@@ -80,12 +81,13 @@ RUN wget -q "${GHIDRA_PROXY}https://github.com/NationalSecurityAgency/ghidra/rel
 WORKDIR /app
 COPY AGENTS.md README.md ./
 COPY prompts/ prompts/
+COPY tools/ tools/
 COPY state/ state/
 COPY docker/opencode.json opencode.json
 COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/llm-forwarder.py /app/docker/llm-forwarder.py
 COPY ctf.config.json /app/ctf.config.json
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh tools/archive_challenge.sh
 
 # 容器启动 = 自动开始比赛
 ENTRYPOINT ["/entrypoint.sh"]
