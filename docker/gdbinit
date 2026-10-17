@@ -1,0 +1,9 @@
+# 容器内 gdb 默认设置（/etc/gdb/gdbinit 与 /root/.gdbinit 共用）
+# 1) 非交互、不打断脚本
+set pagination off
+set confirm off
+# 2) 容器内没有外网/代理，debuginfod 会等待或弹问，关掉
+set debuginfod enabled off
+# 3) 容器里 personality(ADDR_NO_RANDOMIZE) 被禁，gdb 关 ASLR 会报 warning；
+#    显式关掉这个行为，避免每次启动刷警告（注意：容器内 ASLR 实际保持开启）
+set disable-randomization off

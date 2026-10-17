@@ -5,6 +5,7 @@ notes/
 ghidra-projects/
 node_modules/
 dashboard/
+challenges/
 *.log
 Dockerfile
 .dockerignore

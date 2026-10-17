@@ -13,6 +13,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
+    TERM=xterm-256color \
     JAVA_HOME=/opt/corretto \
     GHIDRA_INSTALL_DIR=/opt/ghidra \
     CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1 \
@@ -22,7 +23,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git unzip zip xz-utils jq \
       file binutils socat netcat-openbsd \
-      gdb gdbserver strace ltrace patchelf elfutils \
+      gdb gdb-multiarch gdbserver strace ltrace patchelf elfutils \
+      qemu-user-static \
+      sqlmap gobuster php-cli php-curl php-mbstring php-xml \
+      nmap dnsutils p7zip-full \
       python3 python3-pip python3-venv \
       ruby ruby-dev build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -56,7 +60,15 @@ RUN uv tool install --python /usr/bin/python3 pyghidra-mcp && pyghidra-mcp --hel
 # 含 pyghidra：归档脚本 tools/ghidra_export.py 用它打开 Ghidra 工程逐函数导出
 RUN python3 -m venv /opt/ctf-venv \
     && /opt/ctf-venv/bin/pip install --no-cache-dir \
-       pwntools checksec.py ROPgadget ropper requests websocket-client pyghidra==3.1.0
+       pwntools checksec.py ROPgadget ropper requests websocket-client pyghidra==3.1.0 \
+       pyjwt httpx beautifulsoup4 lxml
+
+# ---- 反序列化 / JWT 辅助工具（构建期联网拉取，失败不阻塞；运行期也可临时补装）----
+RUN git clone --depth 1 https://github.com/ambionics/phpggc /opt/phpggc 2>/dev/null || true; \
+    git clone --depth 1 https://github.com/ticarpi/jwt_tool /opt/jwt_tool 2>/dev/null || true; \
+    curl -sSL -o /opt/ysoserial.jar \
+      https://github.com/frohoff/ysoserial/releases/download/v0.0.6/ysoserial-all.jar 2>/dev/null || true; \
+    echo "phpggc: $(ls /opt/phpggc 2>/dev/null | wc -l) files; jwt_tool: $(ls /opt/jwt_tool 2>/dev/null | wc -l) files; ysoserial: $(stat -c%s /opt/ysoserial.jar 2>/dev/null || echo 0) bytes"
 
 # ---- Ruby pwn 工具（GEM_SOURCE 可在 rubygems.org 不可达时指定镜像）----
 ARG GEM_SOURCE=""
@@ -82,6 +94,8 @@ WORKDIR /app
 COPY AGENTS.md README.md ./
 COPY prompts/ prompts/
 COPY tools/ tools/
+COPY docker/gdbinit /etc/gdb/gdbinit
+COPY docker/gdbinit /root/.gdbinit
 COPY state/ state/
 COPY docker/opencode.json opencode.json
 COPY docker/entrypoint.sh /entrypoint.sh
