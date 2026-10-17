@@ -415,6 +415,25 @@ class Watcher(threading.Thread):
     # -- worker / master 进程
     @staticmethod
     def procs() -> dict:
+        # 真实在跑的 ctf-worker 进程：按 cwd 映射到题号（worker.pid 可能是 setsid/包装 shell 的 pid）
+        real: dict[int, int] = {}
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                cmd = open(f"/proc/{entry}/cmdline", "rb").read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            if "ctf-worker" not in cmd:
+                continue
+            try:
+                cwd = os.readlink(f"/proc/{entry}/cwd")
+            except OSError:
+                continue
+            m = WORK_RE.search(cwd)
+            if m:
+                real[int(m.group(1))] = int(entry)
+
         workers = []
         work_root = os.path.join(APP_DIR, "work")
         if os.path.isdir(work_root):
@@ -427,8 +446,11 @@ class Watcher(threading.Thread):
                     pid = int(open(pid_file).read().strip())
                 except Exception:
                     pass
-                info = {"id": int(cid), "pid": pid, "alive": False}
-                if pid:
+                info = {"id": int(cid), "pid": real.get(int(cid)) or pid, "alive": False}
+                if info["pid"]:
+                    info.update(proc_stat(info["pid"]))
+                if not info.get("alive") and pid and pid != info["pid"]:
+                    info["pid"] = pid
                     info.update(proc_stat(pid))
                 workers.append(info)
         master = {"pid": os.getpid(), "alive": True}

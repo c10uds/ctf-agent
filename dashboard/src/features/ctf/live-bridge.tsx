@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { STREAM_URL } from './api'
+import { fetchSnapshot, STREAM_URL } from './api'
 import { useCtfStore } from './store'
 import type { StreamEvent } from './types'
 
@@ -25,8 +25,21 @@ export function LiveBridge() {
   const setConnected = useCtfStore((s) => s.setConnected)
 
   useEffect(() => {
+    // 首屏不等 SSE：立刻拉一次快照，刷新后数据和流式通道并行加载
+    const load = () => {
+      fetchSnapshot()
+        .then(applySnapshot)
+        .catch(() => {
+          /* 网关没起来时忽略，SSE 重连后会再拉 */
+        })
+    }
+    load()
+
     const es = new EventSource(STREAM_URL)
-    es.onopen = () => setConnected(true)
+    es.onopen = () => {
+      setConnected(true)
+      load() // 重连后补齐断线期间的状态
+    }
     es.onerror = () => setConnected(false)
 
     const feed = (ev: MessageEvent) => {
