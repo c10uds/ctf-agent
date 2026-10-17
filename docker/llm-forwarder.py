@@ -421,10 +421,12 @@ class Watcher(threading.Thread):
             if not entry.isdigit():
                 continue
             try:
+                comm = open(f"/proc/{entry}/comm").read().strip().lower()
                 cmd = open(f"/proc/{entry}/cmdline", "rb").read().decode("utf-8", "replace")
             except OSError:
                 continue
-            if "ctf-worker" not in cmd:
+            # 只认真正的 opencode 进程；包装它的 bash -c 里同样含 "ctf-worker" 字样，要排除
+            if "opencode" not in comm or "ctf-worker" not in cmd:
                 continue
             try:
                 cwd = os.readlink(f"/proc/{entry}/cwd")
@@ -521,15 +523,25 @@ class Watcher(threading.Thread):
             "usage": ("holder", "usage", "用途", "用途（worker pid）", "worker"),
         }
         header = None
+        pending = None
         try:
             for line in open(env_md, encoding="utf-8"):
                 line = line.strip()
-                if not line.startswith("|") or set(line) <= set("|- "):
+                if not line.startswith("|"):
                     continue
                 cols = [c.strip() for c in line.strip("|").split("|")]
+                if cols and all(set(c) <= set("-: ") for c in cols):
+                    low = [c.lower() for c in (pending or [])]
+                    if any(x in low for x in ("challenge id", "id", "题目id", "题目 id")) and any(
+                            x in low for x in ("holder", "usage", "name", "entry", "url",
+                                               "用途", "题目", "入口", "worker")):
+                        header = pending
+                    else:
+                        header = None
+                    pending = None
+                    continue
                 if header is None:
-                    header = [c.lower() for c in cols]
-                    # 表头本身也当作候选数据行（有些 Master 会写说明性首行）
+                    pending = cols
                     continue
                 first = cols[0] if cols else ""
                 if not first or first.lower() in header_words or set(first) <= set("-"):
@@ -617,20 +629,32 @@ def parse_scoreboard() -> list:
         "flag": ("flag",),
     }
     header = None
+    pending = None
     for line in lines:
         line = line.strip()
-        if not line.startswith("|") or set(line) <= set("|- "):
+        if not line.startswith("|"):
             continue
         cols = [c.strip() for c in line.strip("|").split("|")]
+        if cols and all(set(c) <= set("-: ") for c in cols):
+            # 分隔行：上一行才是表头；只认「id + status」这类计分板表头，忽略其它说明表格
+            low = [c.lower() for c in (pending or [])]
+            if ("status" in low or "状态" in low) and any(
+                    x in low for x in ("id", "题目id", "题目 id")):
+                header = pending
+            else:
+                header = None
+            pending = None
+            continue
         if header is None:
-            header = cols
+            pending = cols
             continue
         row = {}
         for key, names in aliases.items():
             idx = next((i for i, c in enumerate(header) if c.lower() in names), None)
             row[key] = cols[idx] if idx is not None and idx < len(cols) else ""
-        if row.get("id") or row.get("title"):
-            rows.append(row)
+        if row.get("id", "").lower() in ("id", "题目id", "题目 id") or not row.get("id"):
+            continue
+        rows.append(row)
     return rows
 
 
