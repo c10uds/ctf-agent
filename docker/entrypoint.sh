@@ -36,6 +36,9 @@ mkdir -p "$CUSTOMER_DIR"
 ln -sfn /app/opencode.json "$CUSTOMER_DIR/opencode.json"
 ln -sfn /app/state "$CUSTOMER_DIR/state"
 ln -sfn /app/work "$CUSTOMER_DIR/work"
+# opencode.json 里 agent 的 prompt 是相对路径 ./prompts/<角色>.md，
+# customer 的 cwd 不同，必须一并软链，否则 opencode 报 bad file reference 直接起不来
+ln -sfn /app/prompts "$CUSTOMER_DIR/prompts"
 
 if [ "${RUN_ONCE:-0}" = "1" ]; then
   exec opencode run --agent ctf-master --auto "$(cat prompts/kickoff-master.md)"
