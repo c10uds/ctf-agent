@@ -24,11 +24,6 @@
       "type": "local",
       "command": ["chrome-devtools-mcp", "--headless=true", "--isolated=true", "--acceptInsecureCerts=true", "--no-usage-statistics", "--chromeArg=--no-sandbox", "--chromeArg=--disable-dev-shm-usage", "--chromeArg=--disable-gpu", "--chromeArg=--no-first-run"],
       "timeout": 120000
-    },
-    "ghidra": {
-      "type": "local",
-      "command": ["pyghidra-mcp", "--transport", "stdio", "--project-path", "ghidra-projects"],
-      "timeout": 180000
     }
   },
   "agent": {

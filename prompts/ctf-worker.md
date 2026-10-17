@@ -55,13 +55,19 @@ summary: <三行以内：做了什么、卡在哪、下一步>
    curl -sSL -H "Authorization: Bearer $TEAM_AGENT_KEY" "$CHALLENGE_API_ENDPOINT<download_url>" -o artifacts/<文件名>
    ```
 2. 本地侦察：附件是压缩包先 `bash /app/tools/archive_challenge.sh .`（解压到 `artifacts/extracted/` 并列出 ELF 候选）；再 `file`、`checksec --file=`、`strings`、`readelf`、`objdump`。**要分析哪些二进制由你自己判断**——至少主程序；需要算偏移/看沙箱时才管 libc/ld。
-3. **ghidra MCP 导入**（可选，用于交互式分析）：`list_project_binaries` 查是否已导入，没有就 `import_binary`（传二进制的**绝对路径**，如 `/app/work/<id>/artifacts/xxx`）。
-4. **一次性归档到本地**（核心：分析一次、全部落盘，之后都读本地）：
+3. **串行导出归档**（核心：分析一次、全部落盘，之后都读本地）：
    ```bash
    python3 /app/tools/ghidra_export.py --binary <名字> --binary-path artifacts/<名字> --out analysis/<名字>
    ```
-   它**自建独立 Ghidra 工程**（`ghidra-export-projects/`，与 ghidra MCP 的 `ghidra-projects/` 分开——MCP 全程锁着那个工程，不能共用），自行导入+分析，把每个函数反编译成 `analysis/<名字>/src/<函数名>.c`，并生成 `INDEX.md` / `functions.txt` / `strings.txt` / `imports.txt` / `metadata.txt`。**归档后先读 `analysis/<名字>/INDEX.md`**，再用 `read_file`（可 offset/limit）与 `grep` 在 `src/` 里定位漏洞。上下文被重置也不丢分析。
-5. **本地文件优先，MCP 只用于交互**：批量阅读/检索一律走 `analysis/`；只有需要语义搜索（`search_code`）、调用图（`gen_callgraph`）、读内存（`read_bytes`）、改命名/注释（`rename_function`/`set_comment`）或临时看一个还没归档的二进制时，才回落 ghidra MCP。**禁止把大段反编译结果经 MCP 读进上下文。**
+   导出是**全局串行的**：同一时刻只有一个 JVM 在跑。如果别的 worker 正在导出，命令会打印"排队中"并**阻塞等待**，拿到锁后自动继续——你直接等它返回即可（通常会比分析本身久一点，别误以为卡死）。分析完进程会退出，内存立刻释放；同一二进制（含 libc）按 sha256 缓存，二次导出直接复用。
+   产物：`INDEX.md`、`functions.txt`、`symbols.txt`、`imports.txt`、`exports.txt`、`strings.txt`、`sections.txt`、`data.txt`、`xrefs/calls.txt`，以及**逐函数的 C 与汇编**：`src/<函数名>.c`、`asm/<函数名>.asm`。
+4. **归档后先读 `analysis/<名字>/INDEX.md`**，再用 `read_file`（可 offset/limit）与 `grep` 在 `src/`（伪代码）和 `asm/`（汇编）里定位漏洞。**不要 cat 整个目录**，按函数读或先 grep 再读。
+5. **需要看某个函数时**（不想重导全量）：
+   ```bash
+   python3 /app/tools/ghidra_export.py --binary <名字> --binary-path artifacts/<名字> \
+       --out analysis/<名字> --decompile <函数名或地址>
+   ```
+   复用缓存工程，只反编译这一个函数并把 C 打印出来，同样受串行队列约束。
 6. 判型：栈溢出 / 堆（UAF、double free、tcache poisoning…）/ 格式化字符串 / 整数溢出 / 栈迁移 / SROP / ret2libc / 沙箱 ORW 等，结合 CANARY/NX/PIE/RELRO 定方案。
 7. pwntools 写 `exploit.py`（shebang `#!/usr/bin/env python3`，venv 已在 PATH）。**本地验证**：`process()` 跑通（有 libc/ld 就 LD_PRELOAD 或 patchelf）；控制 RIP / 读到预期数据即算通过。
 8. 本地验证通过 → 申请环境（协议见上）→ 拿到环境后 `remote(host,port)` 打 → `cat /flag` → `submit_flag` → SOLVED。
@@ -79,5 +85,6 @@ summary: <三行以内：做了什么、卡在哪、下一步>
 
 - 大段命令输出重定向到 `output/` 下的文件再读关键部分，别刷屏。
 - **续跑时先看 `analysis/`**：已有归档就直接读 `INDEX.md` 复用，不重复跑 `ghidra_export.py`；只有新导入的二进制才补归档。
+- 导出排队是正常现象（全局只有一个 JVM）；日志里出现"排队中"时继续等它返回，不要重试并发。
 - 只做与解题相关的事；不碰比赛范围外的目标。
 - 如果会话历史里没有任务书（被异常续跑），先读 `notes.md` 和 `dispatch.md`（若存在）恢复上下文；都沒有就输出 BLOCKED 说明情况。

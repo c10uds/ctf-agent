@@ -20,25 +20,31 @@
 
 ## PWN 二进制分析归档
 
-pwn worker 对每个要分析的二进制**分析一次、全部落盘**：`tools/ghidra_export.py` 自建独立 Ghidra 工程（`ghidra-export-projects/`）导入并分析二进制，逐函数反编译到 `work/<id>/analysis/<二进制>/`：
+pwn worker 对每个要分析的二进制**分析一次、全部落盘**。Ghidra **不再以 MCP 常驻**（每个会话一个 JVM 太吃内存），改为 `tools/ghidra_export.py` 按需导出：
+
+- **全局串行**：所有 worker 共用 `state/ghidra-export.lock`，同一时刻只有一个 JVM；后来者打印"排队中"并阻塞等待，拿到后自动继续；
+- **做完即退**：导出进程结束，JVM 立即释放（实测峰值 ~790MB，退出后归零）；
+- **按 sha256 缓存工程**：`ghidra-export-projects/<sha12>/`，同一二进制（含 libc）只分析一次，二次导出复用（实测 8.4s → 4.8s）；
+- **限额**：JVM 显式 `-Xmx`（默认 768MB），避免默认 2G 堆把 4G 容器打爆。
 
 ```
 analysis/<二进制>/
 ├── INDEX.md        # sha256/文件清单/全函数表/高危导入/读取示例
-├── metadata.txt    # 架构/位宽/endian/编译器/hash/入口点
-├── functions.txt   # 地址 | 名称 | 大小 | 文件
-├── strings.txt
-├── imports.txt
-└── src/<函数名>.c   # 每函数一文件，文件名=函数名（非法字符清洗、重名加地址后缀）
+├── metadata.txt    # 架构/位宽/endian/编译器/hash/队列等待
+├── functions.txt   # 地址 | 名称 | 大小 | src | asm
+├── symbols.txt / imports.txt / exports.txt / strings.txt
+├── sections.txt / data.txt / xrefs/calls.txt
+├── src/<函数名>.c   # 逐函数反编译（文件名=函数名，重名加地址后缀）
+└── asm/<函数名>.asm # 逐函数汇编（地址 | 字节 | 助记符 | 操作数 | 注释/跳转目标）
 ```
 
 ```bash
 python3 tools/ghidra_export.py --binary main --binary-path artifacts/main --out work/42/analysis/main
+# 只看一个函数（复用缓存工程，打印 C）：
+python3 tools/ghidra_export.py --binary main --binary-path artifacts/main --out work/42/analysis/main --decompile check_password
 ```
 
-之后一切阅读/检索都走本地文件（`read_file`/`grep`），**不把大段反编译经 MCP 灌进上下文**，上下文被重置（`-c` 续跑 / 容器重启）也不丢分析；ghidra MCP 保留用于语义搜索、调用图、读内存、改命名/注释等交互。**分析哪些二进制由 worker 自行判断**（至少主程序；libc/ld 等只在需要算偏移时才归档）。`tools/archive_challenge.sh <题目目录>` 做惰性辅助：解压附件并列出 ELF 候选，不自动归档。
-
-> 注意：归档脚本**不能复用 ghidra MCP 的工程**——MCP 服务器在整个会话期间持有 `ghidra-projects/` 的锁，并发打开会抛 Java 异常；两者各用各的工程目录（归档用 `ghidra-export-projects/`）。
+之后一切阅读/检索都走本地文件（`read_file`/`grep`），上下文被重置（`-c` 续跑 / 容器重启）也不丢分析。**分析哪些二进制由 worker 自行判断**（至少主程序；libc/ld 等只在需要算偏移时才归档）。`tools/archive_challenge.sh <题目目录>` 做惰性辅助：解压附件并列出 ELF 候选，不自动归档。
 
 ## 安装准备
 

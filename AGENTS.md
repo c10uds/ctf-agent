@@ -51,8 +51,8 @@
 
 ## 其它 MCP
 
-- **ghidra**（pyghidra-mcp，headless）：pwn 二进制反编译/符号/字符串/交叉引用分析。用 `import_binary` 导入后用 `binary_name` 引用。需要环境变量 `GHIDRA_INSTALL_DIR`（容器内已内置）。**批量阅读走本地归档**——`tools/ghidra_export.py` 自建独立 Ghidra 工程（`ghidra-export-projects/`，与 MCP 的 `ghidra-projects/` 分开：MCP 全程锁着那个工程）把逐函数反编译落盘到 `work/<id>/analysis/`，之后用 read_file/grep 查本地；MCP 只用于交互式查询（`search_code`/`gen_callgraph`/`read_bytes`）与改写（`rename_function`/`set_comment`）。
 - **chrome**（chrome-devtools-mcp）：web 题的浏览器交互（JS 渲染、前端调试）。需要自定义请求头的访问一律改用 curl/requests。
+- **ghidra 不再作为 MCP 常驻**：每个 opencode 会话一个 pyghidra JVM 太吃内存（单实例峰值 ~800MB）。改为按需工具 `tools/ghidra_export.py`——**全局串行**（`state/ghidra-export.lock`，同一时刻只有一个 JVM，后来者排队等待）、**做完即退**（分析完进程退出，内存立刻释放）、**按 sha256 缓存工程**（同一二进制/同一 libc 只分析一次），产物落在 `work/<id>/analysis/`：函数级 `src/*.c`（反编译）与 `asm/*.asm`（汇编），另含符号/导入导出/字符串/段/数据/调用边表。看单个函数用 `--decompile <名字或地址>`。
 
 ## 目录与状态文件协议
 
@@ -68,7 +68,7 @@
 │   ├── worker.pid         # worker 进程 pid
 │   ├── notes.md           # worker 笔记（过程/发现/下一步）
 │   ├── artifacts/         # 原始附件（压缩包解压到 extracted/）
-│   ├── analysis/          # 二进制分析归档（tools/ghidra_export.py 产物，按二进制分子目录，函数文件在 src/）
+│   ├── analysis/          # 二进制分析归档（tools/ghidra_export.py 产物，按二进制分子目录；src/ 反编译、asm/ 汇编）
 │   └── output/            # 大输出文件
 ├── prompts/               # 三个角色的系统提示词 + kickoff
 ├── tools/                 # 工具脚本（ghidra_export.py 归档、archive_challenge.sh 解压）

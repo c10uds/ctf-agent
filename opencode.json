@@ -23,11 +23,6 @@
       "type": "local",
       "command": ["cmd", "/c", "npx", "-y", "chrome-devtools-mcp@latest"],
       "timeout": 120000
-    },
-    "ghidra": {
-      "type": "local",
-      "command": ["cmd", "/c", "uvx", "pyghidra-mcp", "--transport", "stdio", "--project-path", "ghidra-projects"],
-      "timeout": 180000
     }
   },
   "agent": {
