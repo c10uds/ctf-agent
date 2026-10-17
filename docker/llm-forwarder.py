@@ -491,18 +491,37 @@ class Watcher(threading.Thread):
     def env_state() -> dict:
         environments = []
         env_md = os.path.join(APP_DIR, "state", "ENVIRONMENTS.md")
+        header_words = {"challenge id", "题目id", "题目 id", "id"}
+        aliases = {
+            "id": ("challenge id", "id", "题目id", "题目 id"),
+            "entry": ("name", "entry", "url", "题目", "入口", "入口（url / host:port）"),
+            "since": ("since", "started", "启动时间", "时间"),
+            "usage": ("holder", "usage", "用途", "用途（worker pid）", "worker"),
+        }
+        header = None
         try:
             for line in open(env_md, encoding="utf-8"):
                 line = line.strip()
-                if line.startswith("|") and "---" not in line:
-                    cols = [c.strip() for c in line.strip("|").split("|")]
-                    if cols and cols[0] in ("题目ID", ""):
-                        continue
-                    if cols and cols[0]:
-                        environments.append({"id": cols[0],
-                                             "entry": cols[1] if len(cols) > 1 else "",
-                                             "since": cols[2] if len(cols) > 2 else "",
-                                             "usage": cols[3] if len(cols) > 3 else ""})
+                if not line.startswith("|") or set(line) <= set("|- "):
+                    continue
+                cols = [c.strip() for c in line.strip("|").split("|")]
+                if header is None:
+                    header = [c.lower() for c in cols]
+                    # 表头本身也当作候选数据行（有些 Master 会写说明性首行）
+                    continue
+                first = cols[0] if cols else ""
+                if not first or first.lower() in header_words or set(first) <= set("-"):
+                    continue
+                if first in ("(none)", "（无）"):
+                    continue
+                row = {}
+                for key, names in aliases.items():
+                    idx = next((i for i, c in enumerate(header)
+                                if c in names or any(c.startswith(n) for n in names)), None)
+                    row[key] = cols[idx] if idx is not None and idx < len(cols) else ""
+                if not row.get("id"):
+                    row["id"] = first
+                environments.append(row)
         except OSError:
             pass
         requests = []
@@ -558,28 +577,37 @@ def tail_text(path: str, limit: int) -> str:
 
 
 def parse_scoreboard() -> list:
-    """解析 state/SCOREBOARD.md 的表格为题目行。"""
+    """解析 state/SCOREBOARD.md 的表格为题目行（按表头列名映射，列序/中英文可变）。"""
     path = os.path.join(APP_DIR, "state", "SCOREBOARD.md")
     rows = []
     try:
         lines = open(path, encoding="utf-8").read().splitlines()
     except OSError:
         return rows
+
+    aliases = {
+        "id": ("id", "题目id", "题目 id", "#"),
+        "title": ("name", "题目", "名称", "标题"),
+        "category": ("category", "分类", "类型"),
+        "score": ("score", "分值", "points"),
+        "current_score": ("current_score", "current score", "当前分值"),
+        "status": ("status", "状态"),
+        "flag": ("flag",),
+    }
+    header = None
     for line in lines:
         line = line.strip()
         if not line.startswith("|") or set(line) <= set("|- "):
             continue
         cols = [c.strip() for c in line.strip("|").split("|")]
-        if not cols or cols[0] in ("ID", "") or set(cols[0]) <= set("-"):
+        if header is None:
+            header = cols
             continue
-        row = {"id": cols[0],
-               "title": cols[1] if len(cols) > 1 else "",
-               "category": cols[2] if len(cols) > 2 else "",
-               "score": cols[3] if len(cols) > 3 else "",
-               "current_score": cols[4] if len(cols) > 4 else "",
-               "status": cols[5] if len(cols) > 5 else "",
-               "flag": cols[6] if len(cols) > 6 else ""}
-        if row["id"].isdigit() or row["title"]:
+        row = {}
+        for key, names in aliases.items():
+            idx = next((i for i, c in enumerate(header) if c.lower() in names), None)
+            row[key] = cols[idx] if idx is not None and idx < len(cols) else ""
+        if row.get("id") or row.get("title"):
             rows.append(row)
     return rows
 
