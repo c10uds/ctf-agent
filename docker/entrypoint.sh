@@ -42,6 +42,7 @@ if [ "${RUN_ONCE:-0}" = "1" ]; then
 fi
 
 CONTINUE_ROUNDS="${MASTER_CONTINUE_ROUNDS:-5}"   # 每个全新会话后续跑次数
+CONTINUE_DELAY="${MASTER_CONTINUE_DELAY:-30}"    # 每次 -c 续跑之间的间隔秒数（让 worker 有时间推进，避免 Master 空转烧 token）
 DELAY="${MASTER_RESTART_DELAY:-120}"             # 每大轮（新会话开局）之间的间隔秒数
 
 child=0
@@ -72,6 +73,8 @@ while true; do
   for i in $(seq 1 "$CONTINUE_ROUNDS"); do
     echo "[entrypoint] $(date -Is) 续跑 Master 会话（$i/$CONTINUE_ROUNDS）"
     run_master "继续答题" continue
+    sleep "$CONTINUE_DELAY" & child=$!
+    wait "$child"
   done
   echo "[entrypoint] 本大轮结束，${DELAY}s 后开新会话（重置上下文）"
   sleep "$DELAY" & child=$!

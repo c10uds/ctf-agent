@@ -30,7 +30,7 @@
 
 - worker **禁止**调用 `start_challenge`/`stop_challenge`（配置层禁用）。需要环境时：写申请文件 `state/env-requests/<id>.req`（challenge_id/category/type/requested_at）→ 输出 WORKER-REPORT → 结束本轮，**不原地等待**。
 - 被抢占的 web 题由 Master 代写同名 `.req`（多一个 `preempted_at` 字段）重新入队，见下方抢占协议。
-- Master 步骤级轮询 `env-requests/`（每做一两个动作查一次），批准后 `-c` 续跑 worker 并附连接信息，同时删除申请文件。
+- Master 每轮先取一次**只读快照** `bash tools/master_check.sh`（一次性执行、立即返回），发现申请后立即仲裁：批准则 `start_challenge` 开环境 → 登记台账 → `-c` 续跑 worker 并附连接信息 → 删除申请文件。**Master 绝不在 bash 里等待/轮询**（不得写 `for`/`while` 套 `sleep`、`wait`、`tail -f`）：它一阻塞，worker 报告、环境开关、申请队列就全部停摆；"下一次检查"由 entrypoint 的 `-c 续跑` 驱动，每轮处理完即结束本轮回复。
 - 环境台账 `state/ENVIRONMENTS.md` 由 Master 维护（当前持有者、启动时间、用途）；队列真相以 `env-requests/` 目录为准。
 - **抢占规则**：pwn 的 LOCAL_READY 申请优先于进行中的 web；web 被打断时先等其当前轮结束，超过 `ENV_PREEMPT_GRACE`（默认 300s）杀进程强收。环境只在"本地已就绪、就差远程执行"时才申请；pwn 远程打不通应归还环境回本地继续调试（而非攥着环境或频繁重申请），因此天然不会持续抢占 web。
 - **被抢占恢复（恢复优先级最高）**：抢占 web 时，Master 除把该题标回 ANALYZING 外，**必须代写 `state/env-requests/<id>.req`（追加 `preempted_at` 字段）把它重新入队**，否则它就成了一道没人认领的孤儿题。环境归还后的分配优先级固定为：**抢占恢复（含 `preempted_at` 的申请，多条按 `preempted_at` 先等先恢复）> 普通申请队列（FIFO）> 新 web 题**——保证被打断的 web 题一定拿回环境，不被新题饿死。
@@ -71,13 +71,16 @@
 │   ├── analysis/          # 二进制分析归档（tools/ghidra_export.py 产物，按二进制分子目录；src/ 反编译、asm/ 汇编）
 │   └── output/            # 大输出文件
 ├── prompts/               # 三个角色的系统提示词 + kickoff
-├── tools/                 # 工具脚本（ghidra_export.py 归档、archive_challenge.sh 解压）
+├── tools/                 # 工具脚本（master_check.sh 每轮只读快照、ghidra_export.py 归档、archive_challenge.sh 解压）
 ├── gateway/               # 本地 LLM 网关 + 观测面板后端（隧道/事件总线/SSE），非 agent 侧
 ├── dashboard/             # 观测面板前端（React+Vite，npm 构建，本地运行，不进镜像）
 └── opencode.json          # agent 与 MCP 配置
 ```
 
 - `SCOREBOARD.md` 状态枚举：`TODO / ANALYZING / LOCAL_READY / ENV_QUEUED / ATTACKING / SOLVED / BLOCKED / STUCK / SKIP`。
+- **状态文件格式是契约**（观测面板按列名解析，详见 `prompts/ctf-master.md` 的「状态文件格式」）：
+  `SCOREBOARD.md` 只允许**一张表**，表头逐字为 `| id | name | category | score | current_score | status | flag | notes |`；
+  `ENVIRONMENTS.md` 只允许一张表，表头为 `| id | entry | since | holder |`。不要拆成 pwn/web 两张表，也不要放图例/汇总等第二张表格。
 - 写入归属：SCOREBOARD/ENVIRONMENTS 只有 Master 写；REQUESTS 只有 Customer 写、Master 标记；env-requests 默认 worker 写、Master 删，被抢占的 web 题由 Master 代写入队；work/<id>/ 归该题 worker。
 - 每个写操作保持**追加优先**，不要整表重写覆盖他人刚写的内容。
 

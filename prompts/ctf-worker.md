@@ -21,12 +21,14 @@
 ```
 ===WORKER-REPORT===
 challenge_id: <id>
-status: SOLVED | LOCAL_READY | NEED_ENV | BLOCKED | PROGRESS
+status: <只能是 SOLVED / LOCAL_READY / NEED_ENV / BLOCKED / PROGRESS 里的一个词，不要带竖线或其它文字>
 flag: <flag{...}，没有则留空>
 submitted: yes/no/error信息
 summary: <三行以内：做了什么、卡在哪、下一步>
 ===END===
 ```
+
+> 上面的 `<...>` 是占位符，**输出时替换成真实值**，不要把枚举/模板原样抄进去。
 
 - `SOLVED`：拿到并提交 flag 成功
 - `LOCAL_READY`：exploit 本地验证通过，**需要环境**做远程执行
@@ -42,6 +44,7 @@ summary: <三行以内：做了什么、卡在哪、下一步>
    ```bash
    printf 'challenge_id: <id>\ncategory: <pwn|web>\ntype: <LOCAL_READY|NEED_ENV>\nrequested_at: %s\n' "$(date -Is)" > /app/state/env-requests/<id>.req
    ```
+   **`type` 只能写 `LOCAL_READY` 或 `NEED_ENV` 这两个词之一**（不要写 tcp/url/其它）。
    然后输出 `WORKER-REPORT`（status=LOCAL_READY 或 NEED_ENV）并结束回复。**不要在原地循环等待。**
 2. Master 批准后会续跑你，消息里带 `host/port/handshake`（pwn）或 `url/headers`（web）。这时才进行远程攻击。
 3. **持有预算**：**pwn** 拿到环境后默认最多用 10 分钟，预算内没解决 → 把进展写进 notes.md → 报告 PROGRESS → 结束本轮（Master 会收走环境，你之后重新排队）；远程环境只用于最后一步执行，分析尽量在本地做。**web** 拿到的环境不限时，可以持续持有直到解出或主动放弃——但被 pwn 的 LOCAL_READY 申请抢占时会被打断，所以进展要随写随落 `notes.md`。
