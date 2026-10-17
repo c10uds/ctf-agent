@@ -57,6 +57,38 @@ class Hub:
         self.logs_dir = logs_dir
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self._log_files: dict[str, object] = {}
+        self._load_recent()
+
+    # -- 启动时从 JSONL 回放最近事件（页面/网关重启都不丢历史）
+    def _load_recent(self, per_topic: int = 300):
+        topics = ("hello", "scoreboard", "env", "fs", "llm_req", "llm_resp", "chat")
+        for topic in topics:
+            path = self.logs_dir / f"{topic}.jsonl"
+            if not path.is_file():
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    lines = list(deque(f, maxlen=per_topic))
+            except OSError:
+                continue
+            events = []
+            for line in lines:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(e, dict) and e.get("topic") == topic:
+                    events.append(e)
+            events.sort(key=lambda e: e.get("ts") or 0)
+            for e in events:
+                self.ring[topic].append(e)
+                try:
+                    self._merge_state(topic, e.get("data") or {})
+                except Exception:
+                    continue
+        if any(self.ring.values()):
+            log.info("已从日志回放事件：%s",
+                     ", ".join(f"{k}={len(v)}" for k, v in self.ring.items() if v))
 
     # -- 落盘
     def _append_log(self, topic: str, event: dict):
@@ -88,8 +120,11 @@ class Hub:
         elif topic == "fs":
             path = data.get("path")
             if path:
-                s["files"][path] = {"mtime": data.get("mtime"), "size": data.get("size"),
-                                    "challenge_id": data.get("challenge_id")}
+                entry = dict(s["files"].get(path) or {})
+                entry.update({k: v for k, v in data.items() if v is not None})
+                if data.get("deleted"):
+                    entry["tail"] = ""
+                s["files"][path] = entry
         elif topic == "llm_req":
             s["llm"].append(data)
             del s["llm"][:-RING_SIZE]
@@ -491,7 +526,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.wfile.write(f"event: {topic}\ndata: {payload}\n\n".encode("utf-8"))
 
             write_event("snapshot", HUB.snapshot())
-            for e in HUB.recent(["llm_req", "llm_resp", "chat", "env", "metrics", "hello", "scoreboard"], 120):
+            for e in HUB.recent(["llm_req", "llm_resp", "chat", "env", "metrics", "hello",
+                                 "scoreboard", "fs"], 200):
                 write_event("replay", e)
             self.wfile.flush()
 

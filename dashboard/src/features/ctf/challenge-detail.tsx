@@ -7,11 +7,12 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 
-function Blob({ text, empty }: { text?: string; empty: string }) {
+function Blob({ text, empty, newestFirst }: { text?: string; empty: string; newestFirst?: boolean }) {
   if (!text) return <div className='text-muted-foreground p-6 text-center text-sm'>{empty}</div>
+  const body = newestFirst ? text.split('\n').reverse().join('\n') : text
   return (
     <ScrollArea className='h-[60vh]'>
-      <pre className='p-3 pr-4 font-mono text-xs whitespace-pre-wrap'>{text}</pre>
+      <pre className='p-3 pr-4 font-mono text-xs whitespace-pre-wrap'>{body}</pre>
     </ScrollArea>
   )
 }
@@ -75,10 +76,10 @@ export function ChallengeDetail({ challengeId }: { challengeId: number }) {
         <TabsContent value='log'>
           <Card>
             <CardHeader className='pb-3'>
-              <CardTitle className='text-base'>work/{challengeId}/run.log</CardTitle>
+              <CardTitle className='text-base'>work/{challengeId}/run.log（最新在上）</CardTitle>
             </CardHeader>
             <CardContent>
-              <Blob text={logs[challengeId]} empty='暂无日志' />
+              <Blob text={logs[challengeId]} empty='暂无日志' newestFirst />
             </CardContent>
           </Card>
         </TabsContent>

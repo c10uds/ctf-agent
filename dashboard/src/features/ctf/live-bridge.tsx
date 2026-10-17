@@ -51,9 +51,20 @@ export function LiveBridge() {
     }
     es.addEventListener('snapshot', onSnapshot as EventListener)
 
+    // 重连/刷新时后端会补发最近事件（{topic, ts, data}），同样灌进 store
+    const onReplay = (ev: MessageEvent) => {
+      try {
+        applyEvent(JSON.parse(ev.data) as StreamEvent)
+      } catch {
+        /* 忽略 */
+      }
+    }
+    es.addEventListener('replay', onReplay as EventListener)
+
     return () => {
       feeds.forEach((off) => off())
       es.removeEventListener('snapshot', onSnapshot as EventListener)
+      es.removeEventListener('replay', onReplay as EventListener)
       es.close()
     }
   }, [applyEvent, applySnapshot, setConnected])

@@ -12,11 +12,12 @@ export function ChatPanel() {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
 
+  // 最新消息在最上面：新消息到达时回到顶部
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [chat])
+    listRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [chat.length])
 
   const send = async () => {
     const value = text.trim()
@@ -43,13 +44,13 @@ export function ChatPanel() {
         </p>
       </CardHeader>
       <CardContent className='flex min-h-0 flex-1 flex-col gap-3'>
-        <div className='min-h-0 flex-1 space-y-3 overflow-y-auto pr-1'>
+        <div ref={listRef} className='min-h-0 flex-1 space-y-3 overflow-y-auto pr-1'>
           {chat.length === 0 && (
             <div className='text-muted-foreground py-10 text-center text-sm'>
               还没有对话。试试「现在进度如何」。
             </div>
           )}
-          {chat.map((m) => (
+          {[...chat].reverse().map((m) => (
             <div
               key={m.id}
               className={cn('flex', m.role === 'user' ? 'justify-end' : 'justify-start')}
@@ -70,7 +71,6 @@ export function ChatPanel() {
               </div>
             </div>
           ))}
-          <div ref={bottomRef} />
         </div>
         {error && <div className='text-rose-500 text-xs'>{error}</div>}
         <div className='flex gap-2'>

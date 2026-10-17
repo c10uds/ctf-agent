@@ -53,16 +53,28 @@ export const useCtfStore = create<CtfState>((set) => ({
   setConnected: (v) => set({ connected: v }),
 
   applySnapshot: (s) =>
-    set((state) => ({
-      container: s.container ?? state.container,
-      metrics: s.metrics ?? state.metrics,
-      workers: s.proc?.workers ?? Object.values(s.workers ?? {}),
-      scoreboard: s.scoreboard?.length ? s.scoreboard : state.scoreboard,
-      environments: s.environments?.length ? s.environments : state.environments,
-      requests: s.requests ?? state.requests,
-      llm: mergeLlm(s.llm ?? [], state.llm),
-      chat: mergeChat(s.chat ?? [], state.chat),
-    })),
+    set((state) => {
+      // 快照里带着每个状态文件的尾部内容，刷新页面后 notes/run.log 立即恢复，不用等下一次变更
+      const notes = { ...state.notes }
+      const logs = { ...state.logs }
+      for (const f of Object.values(s.files ?? {})) {
+        if (f.challenge_id == null) continue
+        if (f.kind === 'notes' && typeof f.tail === 'string') notes[f.challenge_id] = f.tail
+        if (f.kind === 'log' && typeof f.tail === 'string') logs[f.challenge_id] = f.tail
+      }
+      return {
+        container: s.container ?? state.container,
+        metrics: s.metrics ?? state.metrics,
+        workers: s.proc?.workers ?? Object.values(s.workers ?? {}),
+        scoreboard: s.scoreboard?.length ? s.scoreboard : state.scoreboard,
+        environments: s.environments?.length ? s.environments : state.environments,
+        requests: s.requests ?? state.requests,
+        llm: mergeLlm(s.llm ?? [], state.llm),
+        chat: mergeChat(s.chat ?? [], state.chat),
+        notes,
+        logs,
+      }
+    }),
 
   applyEvent: (e) =>
     set((state) => {

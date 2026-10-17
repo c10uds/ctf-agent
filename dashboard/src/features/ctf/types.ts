@@ -87,6 +87,9 @@ export interface FileState {
   mtime?: number
   size?: number
   challenge_id?: number | null
+  kind?: string
+  tail?: string
+  deleted?: boolean
 }
 
 export interface FsEvent {
