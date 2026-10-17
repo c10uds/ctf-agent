@@ -7,7 +7,9 @@
 - **做完即退**：分析完输出文件后进程退出，JVM 随之结束，内存立刻还回去。
 - **缓存复用**：工程按二进制 sha256 前 12 位分目录（ghidra-export-projects/<sha12>/），
   同一个二进制（含同一 libc）只分析一次，二次导出直接复用。
-- **限额**：JVM 显式 -Xmx（默认 768m，--maxmem 可调），避免默认 2G 堆把 4G 容器打爆。
+- **内存**：默认**不设** -Xmx，交由 JVM 按它检测到的内存自决（容器带 `-m` 限额时约取 25% 限额，
+  4G 容器 ≈ 1G 堆）；要钉死就用 `--maxmem <MB>`。注意容器**没有** `-m` 限额时 JVM 看到的是宿主机内存，
+  默认堆会随之变大（此时建议显式给 `--maxmem`）。
 - **全量导出**：函数（反编译 C + 逐函数汇编）、符号、导入导出、字符串、段、数据、调用边表。
 
 用法：
@@ -160,7 +162,12 @@ def open_program_ctx(args, project_dir: Path):
 
     if not pyghidra.started():
         launcher = HeadlessPyGhidraLauncher()
-        launcher.add_vmargs(f"-Xmx{args.maxmem}m", "-XX:MaxMetaspaceSize=256m")
+        if str(args.maxmem).lower() in ("none", "", "0"):
+            # 默认不设上限：让 JVM 按自己检测到的内存决定（容器有 -m 限额时约 25% 限额）
+            log("JVM 堆：未设 -Xmx（由 JVM 自决）")
+        else:
+            launcher.add_vmargs(f"-Xmx{args.maxmem}m")
+            log(f"JVM 堆：-Xmx{args.maxmem}m")
         launcher.start()
 
     warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -573,7 +580,8 @@ def parse_args():
     ap.add_argument("--out", required=True, help="输出目录，如 work/42/analysis/main")
     ap.add_argument("--project", default=default_project_base(),
                     help="导出工程根目录（默认容器内 /app/ghidra-export-projects，按 sha256 分子目录，跨题目共享）")
-    ap.add_argument("--maxmem", type=int, default=768, help="JVM 最大堆（MB，默认 768）")
+    ap.add_argument("--maxmem", default="none",
+                    help="JVM 最大堆：'none'（默认，不传 -Xmx，交给 JVM 按检测到的内存自决）或整数 MB")
     ap.add_argument("--wait-timeout", type=int, default=1800, help="排队等待上限秒数（默认 1800）")
     ap.add_argument("--lazy", action="store_true", help="只出清单/表格，不逐函数反编译")
     ap.add_argument("--no-asm", action="store_true", help="不导出逐函数汇编")
@@ -602,7 +610,7 @@ def main() -> int:
     t0 = time.time()
     try:
         cached = (project_dir / "proj.gpr").exists()
-        log(f"{'复用缓存' if cached else '新建工程'} {project_dir}（-Xmx{args.maxmem}m）")
+        log(f"{'复用缓存' if cached else '新建工程'} {project_dir}（heap={args.maxmem}）")
         with open_program_ctx(args, project_dir) as flat_api:
             program = flat_api.getCurrentProgram()
             if args.decompile:
