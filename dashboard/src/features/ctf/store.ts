@@ -103,11 +103,18 @@ export const useCtfStore = create<CtfState>((set) => ({
           return {}
         }
         case 'llm_req':
-          return { llm: mergeLlm([d as unknown as LlmEvent], state.llm) }
-        case 'llm_resp':
-          return { llm: mergeLlm([d as unknown as LlmEvent], state.llm) }
+          return { llm: mergeLlm([{ ts: e.ts, ...(d as unknown as LlmEvent) }], state.llm) }
+        case 'llm_resp': {
+          // 响应的 preview 是"回复摘要"，别覆盖请求行里的"最后一条用户消息"
+          const resp = { ...(d as unknown as LlmEvent) }
+          if (resp.preview) {
+            resp.resp_preview = resp.preview
+            delete resp.preview
+          }
+          return { llm: mergeLlm([{ ts: e.ts, ...resp }], state.llm) }
+        }
         case 'chat': {
-          const msg = d as unknown as ChatMessage
+          const msg = { ts: e.ts, ...(d as unknown as ChatMessage) }
           return { chat: upsert(state.chat, msg) }
         }
         default:

@@ -1,5 +1,17 @@
 export type AgentName = 'master' | 'worker' | 'customer' | 'unknown' | 'direct'
 
+export interface LlmMessage {
+  role: string
+  text: string
+  len?: number
+  truncated?: boolean
+}
+
+export interface LlmToolCall {
+  name?: string
+  args?: string
+}
+
 export interface LlmEvent {
   id: number
   agent?: AgentName
@@ -16,6 +28,22 @@ export interface LlmEvent {
   status?: number
   error?: string
   ts?: number
+  path?: string
+  // 请求详情（展开视图）
+  params?: Record<string, unknown>
+  messages?: LlmMessage[]
+  message_count?: number
+  messages_trimmed?: boolean
+  tools?: string[]
+  body_len?: number
+  parse_error?: boolean
+  // 响应详情（展开视图）
+  text?: string
+  text_truncated?: boolean
+  reasoning?: string
+  reasoning_truncated?: boolean
+  finish_reason?: string
+  tool_calls?: LlmToolCall[]
 }
 
 export interface ChatMessage {
@@ -33,6 +61,8 @@ export interface Metrics {
   load: number[]
   mem_total: number
   mem_used: number
+  mem_avail?: number
+  cgroup_mem?: { current: number; limit: number }
   disk: { total: number; used: number; free: number }
   uptime: number
   opencode_procs: number
@@ -43,6 +73,8 @@ export interface WorkerProc {
   id: number
   pid: number | null
   alive: boolean
+  state?: 'running' | 'solved' | 'pending' | 'exited'
+  score_status?: string
   rss?: number
   cpu_ticks?: number
   started_at?: number
@@ -53,6 +85,7 @@ export interface ContainerInfo {
   pid?: number
   app_dir?: string
   uptime?: number
+  started_at?: number
   connected?: boolean
 }
 

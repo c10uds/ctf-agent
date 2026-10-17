@@ -34,7 +34,14 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
 log = logging.getLogger("llm-gateway")
 
-PREVIEW = 200
+PREVIEW = 200            # 列表行里的一行摘要
+DETAIL_MSG = 800         # 展开视图：单条消息正文上限（字符）
+DETAIL_MSGS = 24         # 展开视图：保留的消息条数（优先首条 system + 最近若干条）
+DETAIL_TEXT = 6000       # 展开视图：响应正文上限
+DETAIL_REASON = 4000     # 展开视图：思考过程上限
+DETAIL_ARGS = 1200       # 展开视图：单次工具调用参数上限
+SNAP_LLM_DETAIL = 60     # 快照/回放里保留完整详情的最近请求数（更早的只留摘要）
+HEAVY_LLM = ("messages", "text", "reasoning", "tool_calls", "tools")
 RING_SIZE = 500
 HOP_HEADERS = {"host", "content-length", "connection", "authorization", "accept-encoding",
                "transfer-encoding", "content-encoding"}
@@ -83,7 +90,9 @@ class Hub:
             for e in events:
                 self.ring[topic].append(e)
                 try:
-                    self._merge_state(topic, e.get("data") or {})
+                    d = dict(e.get("data") or {})
+                    d.setdefault("ts", e.get("ts"))   # 老日志也补上时间戳
+                    self._merge_state(topic, d)
                 except Exception:
                     continue
         if any(self.ring.values()):
@@ -151,10 +160,13 @@ class Hub:
             del s["chat"][:-RING_SIZE]
 
     def publish(self, topic: str, data: dict):
-        event = {"topic": topic, "ts": data.get("ts") or time.time(), "data": data}
+        ts = data.get("ts") or time.time()
+        payload = dict(data)
+        payload.setdefault("ts", ts)   # 事件时间随 data 一起下发，前端才能显示"日志时间"
+        event = {"topic": topic, "ts": ts, "data": payload}
         with self.lock:
             self.ring[topic].append(event)
-            self._merge_state(topic, data)
+            self._merge_state(topic, payload)
             subs = list(self.subs)
             self._append_log(topic, event)
         for q in subs:
@@ -176,7 +188,9 @@ class Hub:
 
     def snapshot(self) -> dict:
         with self.lock:
-            return json.loads(json.dumps(self.state, ensure_ascii=False, default=str))
+            st = dict(self.state)
+            st["llm"] = self._trim_llm(list(st.get("llm") or []))
+            return json.loads(json.dumps(st, ensure_ascii=False, default=str))
 
     def recent(self, topics: list[str] | None, limit: int) -> list[dict]:
         with self.lock:
@@ -184,8 +198,25 @@ class Hub:
                 items = [e for t in topics for e in self.ring.get(t, ())]
             else:
                 items = [e for dq in self.ring.values() for e in dq]
-        items.sort(key=lambda e: e.get("ts") or 0)
-        return items[-limit:]
+            items.sort(key=lambda e: e.get("ts") or 0)
+            items = items[-limit:]
+            keep_ids = self._detail_ids()
+        out = []
+        for e in items:
+            d = e.get("data") or {}
+            if e.get("topic") in ("llm_req", "llm_resp") and d.get("id") not in keep_ids:
+                out.append({"topic": e.get("topic"), "ts": e.get("ts"), "data": slim_llm(d)})
+            else:
+                out.append(e)
+        return out
+
+    # -- 详情只保留最近若干条：快照/回放里更早的请求只留摘要，避免几 MB 的载荷
+    def _trim_llm(self, items: list) -> list:
+        cut = max(0, len(items) - SNAP_LLM_DETAIL)
+        return [slim_llm(e) for e in items[:cut]] + items[cut:]
+
+    def _detail_ids(self) -> set:
+        return {e.get("id") for e in (self.state.get("llm") or [])[-SNAP_LLM_DETAIL:]}
 
 
 # ---------------------------------------------------------------- LLM 路由
@@ -219,17 +250,82 @@ HUB: Hub
 TOKEN = "changeme"
 
 
-def last_user_preview(body: str) -> str:
+def text_of(content) -> str:
+    """把 OpenAI 风格的 content（字符串或 parts 数组）压成纯文本。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for p in content:
+            if not isinstance(p, dict):
+                continue
+            if p.get("text") is not None:
+                out.append(str(p.get("text")))
+            elif p.get("type") == "tool_use":
+                out.append(f"[tool_use {p.get('name')}]")
+            elif p.get("type") in ("image_url", "image", "input_image"):
+                out.append("[image]")
+        return "\n".join(out)
+    return "" if content is None else str(content)
+
+
+def clip(s: str, limit: int) -> tuple[str, bool]:
+    return (s, False) if len(s) <= limit else (s[:limit], True)
+
+
+def slim_llm(data: dict) -> dict:
+    """只留列表行需要的摘要，去掉展开视图里的大字段（消息/正文/思考）。"""
+    return {k: v for k, v in data.items() if k not in HEAVY_LLM}
+
+
+def describe_request(body: str) -> dict:
+    """请求体 → 展开视图所需的字段：参数、消息（截断）、工具名。"""
+    try:
+        j = json.loads(body)
+    except Exception:
+        return {"body_len": len(body), "parse_error": True}
+    if not isinstance(j, dict):
+        return {"body_len": len(body), "parse_error": True}
+    msgs = j.get("messages") if isinstance(j.get("messages"), list) else []
+    if len(msgs) > DETAIL_MSGS:
+        kept = [msgs[0]] + msgs[-(DETAIL_MSGS - 1):]
+    else:
+        kept = msgs
+    out_msgs = []
+    for m in kept:
+        if not isinstance(m, dict):
+            continue
+        t = text_of(m.get("content"))
+        text, cut = clip(t, DETAIL_MSG)
+        out_msgs.append({"role": str(m.get("role") or "?"), "len": len(t),
+                         "text": text, "truncated": cut})
+    tools = []
+    raw_tools = j.get("tools")
+    if isinstance(raw_tools, list):
+        for t in raw_tools:
+            if isinstance(t, dict):
+                fn = t.get("function") if isinstance(t.get("function"), dict) else {}
+                tools.append(str(fn.get("name") or t.get("name") or "?"))
+    params = {k: v for k, v in j.items() if k not in ("messages", "tools")}
+    return {"params": params, "message_count": len(msgs), "messages": out_msgs,
+            "messages_trimmed": len(msgs) > len(kept), "tools": tools, "body_len": len(body)}
+
+
+def last_message_preview(body: str) -> str:
+    """列表行摘要：优先最后一条 user 消息；没有 user（如纯 tool 续跑）就退回最后一条并标角色。"""
     try:
         msgs = json.loads(body).get("messages") or []
-        for m in reversed(msgs):
-            if m.get("role") == "user":
-                c = m.get("content")
-                if isinstance(c, list):
-                    c = " ".join(str(p.get("text", "")) for p in c if isinstance(p, dict))
-                return str(c)[:PREVIEW].replace("\n", " ")
     except Exception:
-        pass
+        return ""
+    for m in reversed(msgs):
+        if isinstance(m, dict) and m.get("role") == "user":
+            return text_of(m.get("content"))[:PREVIEW].replace("\n", " ")
+    for m in reversed(msgs):
+        if not isinstance(m, dict):
+            continue
+        t = text_of(m.get("content")).replace("\n", " ").strip()
+        if t:
+            return f"[{m.get('role')}] {t}"[:PREVIEW]
     return ""
 
 
@@ -261,11 +357,13 @@ def proxy(method: str, path: str, headers: dict, body: str, req_meta: dict | Non
     prefix = meta.get("prefix", "")
 
     if HUB is not None:
-        HUB.publish("llm_req", {
+        req_event = {
             "id": meta.get("id"), "agent": meta.get("agent"), "challenge_id": meta.get("challenge_id"),
             "prefix": prefix, "model": real_model or orig_model, "orig_model": orig_model,
-            "stream": stream, "preview": last_user_preview(body), "path": path,
-        })
+            "stream": stream, "preview": last_message_preview(body), "path": path,
+        }
+        req_event.update(describe_request(body))   # 展开视图：messages / params / tools
+        HUB.publish("llm_req", req_event)
 
     t0 = time.time()
     r = requests.request(method, url, headers=out_headers, data=out_body.encode("utf-8"),
@@ -282,9 +380,14 @@ def proxy(method: str, path: str, headers: dict, body: str, req_meta: dict | Non
         raise RuntimeError(f"上游返回 {status}: {content}")
 
     preview_buf: list[str] = []
+    reason_buf: list[str] = []
+    calls: dict[int, dict] = {}
+    finish: list[str] = []
+    text_len = reason_len = 0
     usage: dict = {}
 
     def chunks():
+        nonlocal text_len, reason_len
         try:
             for data in r.iter_content(chunk_size=4096, decode_unicode=False):
                 if not data:
@@ -295,21 +398,39 @@ def proxy(method: str, path: str, headers: dict, body: str, req_meta: dict | Non
                         continue
                     try:
                         cj = json.loads(line[5:].strip())
-                        if cj.get("usage"):
-                            usage.update(cj["usage"])
-                        delta = (cj.get("choices") or [{}])[0].get("delta") or {}
-                        piece = delta.get("content") or ""
-                        if piece and sum(len(x) for x in preview_buf) < PREVIEW:
-                            preview_buf.append(piece)
                     except Exception:
-                        pass
+                        continue
+                    if cj.get("usage"):
+                        usage.update(cj["usage"])
+                    choice = (cj.get("choices") or [{}])[0]
+                    delta = choice.get("delta") or {}
+                    piece = delta.get("content") or ""
+                    if piece and text_len < DETAIL_TEXT:
+                        preview_buf.append(piece)
+                        text_len += len(piece)
+                    think = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                    if think and reason_len < DETAIL_REASON:
+                        reason_buf.append(think)
+                        reason_len += len(think)
+                    for tc in (delta.get("tool_calls") or []):
+                        if not isinstance(tc, dict):
+                            continue
+                        slot = calls.setdefault(int(tc.get("index") or 0), {"name": "", "args": ""})
+                        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                        if fn.get("name"):
+                            slot["name"] = str(fn["name"])
+                        if fn.get("arguments"):
+                            slot["args"] = (slot["args"] + str(fn["arguments"]))[:DETAIL_ARGS]
+                    if choice.get("finish_reason"):
+                        finish.append(str(choice["finish_reason"]))
                 yield text
         finally:
             r.close()
             dur = round(time.time() - t0, 2)
+            text_join, reason_join = "".join(preview_buf), "".join(reason_buf)
             log.info("[响应] %s %s status=%d dur=%.1fs tokens=%s | %s",
                      method, path, status, dur, usage.get("total_tokens", "-"),
-                     "".join(preview_buf)[:PREVIEW].replace("\n", " "))
+                     text_join[:PREVIEW].replace("\n", " "))
             if HUB is not None:
                 HUB.publish("llm_resp", {
                     "id": meta.get("id"), "agent": meta.get("agent"),
@@ -317,12 +438,17 @@ def proxy(method: str, path: str, headers: dict, body: str, req_meta: dict | Non
                     "tokens": usage.get("total_tokens"),
                     "prompt_tokens": usage.get("prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens"),
-                    "preview": "".join(preview_buf)[:PREVIEW].replace("\n", " "),
+                    "preview": text_join[:PREVIEW].replace("\n", " "),
+                    "text": text_join, "text_truncated": text_len >= DETAIL_TEXT,
+                    "reasoning": reason_join,
+                    "reasoning_truncated": reason_len >= DETAIL_REASON,
+                    "finish_reason": finish[-1] if finish else None,
+                    "tool_calls": [calls[k] for k in sorted(calls)],
                 })
 
     log.info("[请求] %s %s agent=%s challenge=%s model=%s→%s | %s",
              method, path, meta.get("agent"), meta.get("challenge_id"),
-             orig_model, real_model or orig_model, last_user_preview(body))
+             orig_model, real_model or orig_model, last_message_preview(body))
     return status, dict(r.headers), chunks()
 
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { sendChat } from './api'
 import { useCtfStore } from './store'
+import { formatTime } from './helpers'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Textarea } from '@/components/ui/textarea'
@@ -68,6 +69,9 @@ export function ChatPanel() {
                   <span className='text-muted-foreground ml-1 animate-pulse'>▌</span>
                 )}
                 {m.error && <div className='text-rose-500 mt-1 text-xs'>{m.error}</div>}
+                <div className='text-muted-foreground mt-1 text-[10px] opacity-70'>
+                  {formatTime(m.ts)}
+                </div>
               </div>
             </div>
           ))}

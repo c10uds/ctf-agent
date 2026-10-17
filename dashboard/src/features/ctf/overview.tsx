@@ -2,7 +2,6 @@ import { useCtfStore } from './store'
 import { MetricsCards } from './metrics-cards'
 import { LlmFeed } from './llm-feed'
 import { EnvironmentsPanel } from './environments-panel'
-import { statusClass } from './helpers'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
@@ -28,7 +27,7 @@ export function Overview() {
 
       <MetricsCards />
 
-      <div className='grid gap-4 lg:grid-cols-2'>
+      <div className='grid items-start gap-4 lg:grid-cols-2'>
         <Card>
           <CardHeader className='pb-3'>
             <CardTitle className='text-base'>Worker 进程</CardTitle>
@@ -37,27 +36,36 @@ export function Overview() {
             {workers.length === 0 && (
               <div className='text-muted-foreground text-sm'>暂无 worker</div>
             )}
-            {workers.map((w) => (
-              <div
-                key={w.id}
-                className='flex items-center justify-between rounded-md border px-3 py-2 text-sm'
-              >
-                <div className='flex items-center gap-2'>
-                  <Badge variant='outline' className='font-mono'>
-                    #{w.id}
-                  </Badge>
-                  <Badge
-                    variant='outline'
-                    className={cn('font-mono text-[10px]', statusClass(w.alive ? 'ATTACKING' : 'STUCK'))}
-                  >
-                    {w.alive ? 'running' : 'dead'}
-                  </Badge>
+            {workers.map((w) => {
+              const st = w.state ?? (w.alive ? 'running' : 'exited')
+              const label = {
+                running: '运行中', solved: '已解出', pending: '未派发', exited: '已结束',
+              }[st]
+              const cls = {
+                running: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30',
+                solved: 'bg-sky-500/15 text-sky-600 dark:text-sky-400 border-sky-500/30',
+                pending: 'bg-muted text-muted-foreground border-border',
+                exited: 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30',
+              }[st]
+              return (
+                <div
+                  key={w.id}
+                  className='flex items-center justify-between rounded-md border px-3 py-2 text-sm'
+                >
+                  <div className='flex items-center gap-2'>
+                    <Badge variant='outline' className='font-mono'>
+                      #{w.id}
+                    </Badge>
+                    <Badge variant='outline' className={cn('text-[10px]', cls)}>
+                      {label}
+                    </Badge>
+                  </div>
+                  <div className='text-muted-foreground font-mono text-xs'>
+                    pid {w.pid ?? '-'} · rss {w.rss ? `${Math.round(w.rss / 1048576)}MB` : '-'}
+                  </div>
                 </div>
-                <div className='text-muted-foreground font-mono text-xs'>
-                  pid {w.pid ?? '-'} · rss {w.rss ? `${Math.round(w.rss / 1048576)}MB` : '-'}
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </CardContent>
         </Card>
 
@@ -66,7 +74,7 @@ export function Overview() {
             <CardTitle className='text-base'>最近 AI 活动</CardTitle>
           </CardHeader>
           <CardContent>
-            <LlmFeed events={llm.slice(0, 12)} empty='暂无 AI 请求' />
+            <LlmFeed events={llm.slice(0, 12)} empty='暂无 AI 请求' heightClass='h-[46vh]' />
           </CardContent>
         </Card>
       </div>

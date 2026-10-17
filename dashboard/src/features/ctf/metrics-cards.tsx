@@ -22,9 +22,24 @@ export function MetricsCards() {
   const container = useCtfStore((s) => s.container)
   const connected = useCtfStore((s) => s.connected)
 
-  const memPct = metrics && metrics.mem_total ? (metrics.mem_used / metrics.mem_total) * 100 : 0
+  // 内存优先看容器 cgroup 账本；拿不到才退回宿主机数字（并明确标注"宿主机"）
+  const cg = metrics?.cgroup_mem
+  const cgLimit = cg?.limit ?? 0
+  const memUsed = cg?.current ? cg.current : (metrics?.mem_used ?? 0)
+  const memTotal = cgLimit || metrics?.mem_total || 0
+  const memPct = memTotal ? (memUsed / memTotal) * 100 : 0
+  const memHint = metrics
+    ? cgLimit
+      ? `容器限额 ${formatBytes(cgLimit)} · 已用 ${memPct.toFixed(0)}%`
+      : `宿主机 共 ${formatBytes(memTotal)} · 已用 ${memPct.toFixed(0)}%`
+    : undefined
+
   const diskPct =
     metrics && metrics.disk?.total ? (metrics.disk.used / metrics.disk.total) * 100 : 0
+
+  // 容器存活时间以 forwarder 上线时间算；/proc/uptime 是宿主机的，会误标成"容器运行 18h"
+  const aliveSec =
+    container?.started_at != null ? Math.max(0, Date.now() / 1000 - container.started_at) : undefined
 
   return (
     <div className='space-y-4'>
@@ -40,7 +55,8 @@ export function MetricsCards() {
         </span>
         {container?.host && (
           <span className='text-muted-foreground text-xs'>
-            host={container.host} · 容器运行 {formatUptime(container.uptime)}
+            host={container.host}
+            {aliveSec != null && ` · 本次会话 ${formatUptime(aliveSec)}`}
           </span>
         )}
       </div>
@@ -49,21 +65,26 @@ export function MetricsCards() {
         <Stat
           label='负载 (1/5/15m)'
           value={metrics ? metrics.load.map((x) => x.toFixed(2)).join(' / ') : '-'}
+          hint='宿主机'
         />
         <Stat
-          label='内存'
-          value={metrics ? `${formatBytes(metrics.mem_used)}` : '-'}
-          hint={metrics ? `共 ${formatBytes(metrics.mem_total)} · ${memPct.toFixed(0)}%` : undefined}
+          label={cgLimit ? '内存（容器）' : '内存'}
+          value={metrics ? formatBytes(memUsed) : '-'}
+          hint={memHint}
         />
         <Stat
           label='磁盘 /app'
           value={metrics?.disk?.total ? formatBytes(metrics.disk.used) : '-'}
-          hint={metrics?.disk?.total ? `共 ${formatBytes(metrics.disk.total)} · ${diskPct.toFixed(0)}%` : undefined}
+          hint={
+            metrics?.disk?.total
+              ? `共 ${formatBytes(metrics.disk.total)} · ${diskPct.toFixed(0)}%`
+              : undefined
+          }
         />
         <Stat
           label='opencode 进程'
           value={metrics ? String(metrics.opencode_procs) : '-'}
-          hint={metrics ? `容器启动 ${formatUptime(metrics.uptime)}` : undefined}
+          hint={aliveSec != null ? `容器存活 ${formatUptime(aliveSec)}` : undefined}
         />
       </div>
     </div>

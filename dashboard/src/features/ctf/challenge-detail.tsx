@@ -3,7 +3,6 @@ import { LlmFeed } from './llm-feed'
 import { statusClass, formatTime } from './helpers'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 
@@ -11,9 +10,9 @@ function Blob({ text, empty, newestFirst }: { text?: string; empty: string; newe
   if (!text) return <div className='text-muted-foreground p-6 text-center text-sm'>{empty}</div>
   const body = newestFirst ? text.split('\n').reverse().join('\n') : text
   return (
-    <ScrollArea className='h-[60vh]'>
-      <pre className='p-3 pr-4 font-mono text-xs whitespace-pre-wrap'>{body}</pre>
-    </ScrollArea>
+    <div className='h-[60vh] w-full min-w-0 overflow-x-hidden overflow-y-auto rounded-md border'>
+      <pre className='p-3 pr-4 font-mono text-xs break-words whitespace-pre-wrap'>{body}</pre>
+    </div>
   )
 }
 

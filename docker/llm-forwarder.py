@@ -189,6 +189,7 @@ class Tunnel:
         self.connected = threading.Event()
         self._next_id = 0
         self.on_control = None  # 由 ChatBridge 注入
+        self.on_connect = None  # 隧道重连后重发全量状态
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self):
@@ -203,6 +204,11 @@ class Tunnel:
                 backoff = 2
                 log.info("隧道已建立")
                 self.send_event("hello", container_info())
+                if self.on_connect:
+                    try:
+                        self.on_connect()
+                    except Exception:
+                        log.exception("重连回调失败")
                 while True:
                     raw = ws.recv()
                     if not raw:
@@ -360,6 +366,10 @@ class Watcher(threading.Thread):
         super().__init__(daemon=True, name="watcher")
         self.seen: dict[str, tuple] = {}
 
+    def resync(self):
+        """隧道重连时清空已见记录，下一轮 tick 会把当前全部状态重发一遍。"""
+        self.seen.clear()
+
     def run(self):
         while True:
             try:
@@ -389,6 +399,14 @@ class Watcher(threading.Thread):
                     mem_avail = int(line.split()[1]) * 1024
         except Exception:
             pass
+        # 容器自己的内存账本：cgroup v2 的限额与当前用量（宿主机 15GB 对判断 4GB 预算毫无意义）
+        cg = {}
+        try:
+            limit = open("/sys/fs/cgroup/memory.max").read().strip()
+            current = int(open("/sys/fs/cgroup/memory.current").read().strip())
+            cg = {"current": current, "limit": int(limit) if limit.isdigit() else 0}
+        except Exception:
+            pass
         try:
             du = shutil.disk_usage(APP_DIR)
             disk = {"total": du.total, "used": du.used, "free": du.free}
@@ -409,7 +427,8 @@ class Watcher(threading.Thread):
             if "opencode" in cmd:
                 opencode += 1
         return {"load": [float(x) for x in load], "mem_total": mem_total,
-                "mem_used": max(mem_total - mem_avail, 0), "disk": disk,
+                "mem_used": max(mem_total - mem_avail, 0), "mem_avail": mem_avail,
+                "cgroup_mem": cg, "disk": disk,
                 "uptime": uptime, "opencode_procs": opencode, "ts": time.time()}
 
     # -- worker / master 进程
@@ -438,11 +457,18 @@ class Watcher(threading.Thread):
 
         workers = []
         work_root = os.path.join(APP_DIR, "work")
+        scores = {}
+        try:
+            for row in parse_scoreboard():
+                scores[str(row.get("id"))] = (row.get("status") or "").upper()
+        except Exception:
+            pass
         if os.path.isdir(work_root):
             for cid in sorted(os.listdir(work_root)):
                 if not cid.isdigit():
                     continue
                 pid_file = os.path.join(work_root, cid, "worker.pid")
+                run_log = os.path.join(work_root, cid, "run.log")
                 pid = None
                 try:
                     pid = int(open(pid_file).read().strip())
@@ -454,6 +480,17 @@ class Watcher(threading.Thread):
                 if not info.get("alive") and pid and pid != info["pid"]:
                     info["pid"] = pid
                     info.update(proc_stat(pid))
+                # 细分状态：运行中 / 已解出 / 未派发 / 已结束（轮次结束或被终止）
+                score_status = scores.get(cid, "")
+                info["score_status"] = score_status
+                if info.get("alive"):
+                    info["state"] = "running"
+                elif score_status == "SOLVED":
+                    info["state"] = "solved"
+                elif not os.path.exists(pid_file) and not os.path.exists(run_log):
+                    info["state"] = "pending"
+                else:
+                    info["state"] = "exited"
                 workers.append(info)
         master = {"pid": os.getpid(), "alive": True}
         return {"workers": workers, "master": master, "ts": time.time()}
@@ -611,7 +648,11 @@ def tail_text(path: str, limit: int) -> str:
 
 
 def parse_scoreboard() -> list:
-    """解析 state/SCOREBOARD.md 的表格为题目行（按表头列名映射，列序/中英文可变）。"""
+    """解析 state/SCOREBOARD.md 的表格为题目行。
+
+    支持一个文件里多张表（常见：## Pwn 一张、## Web 一张），按表头列名映射，
+    列序/中英文可变；没有「分类」列时用所在小节标题（Pwn/Web）兜底。
+    """
     path = os.path.join(APP_DIR, "state", "SCOREBOARD.md")
     rows = []
     try:
@@ -628,18 +669,36 @@ def parse_scoreboard() -> list:
         "status": ("status", "状态"),
         "flag": ("flag",),
     }
+    header_words = ("id", "题目id", "题目 id")
+
+    def is_header_row(cols) -> bool:
+        return bool(cols) and cols[0].strip().lower() in header_words
+
+    def section_category(section: str) -> str:
+        s = section.lower()
+        if "pwn" in s:
+            return "pwn"
+        if "web" in s:
+            return "web"
+        return ""
+
     header = None
     pending = None
+    section = ""
     for line in lines:
-        line = line.strip()
-        if not line.startswith("|"):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            section = stripped.lstrip("#").strip()
+            header = None
+            pending = None
             continue
-        cols = [c.strip() for c in line.strip("|").split("|")]
+        if not stripped.startswith("|"):
+            continue
+        cols = [c.strip() for c in stripped.strip("|").split("|")]
         if cols and all(set(c) <= set("-: ") for c in cols):
-            # 分隔行：上一行才是表头；只认「id + status」这类计分板表头，忽略其它说明表格
+            # 分隔行：上一行才是表头；只认「id + status」这类计分板表头
             low = [c.lower() for c in (pending or [])]
-            if ("status" in low or "状态" in low) and any(
-                    x in low for x in ("id", "题目id", "题目 id")):
+            if ("status" in low or "状态" in low) and any(x in low for x in header_words):
                 header = pending
             else:
                 header = None
@@ -648,12 +707,19 @@ def parse_scoreboard() -> list:
         if header is None:
             pending = cols
             continue
+        if is_header_row(cols):
+            # 又碰到下一张表的表头：切成新的候选表头，别当数据
+            pending = cols
+            header = None
+            continue
         row = {}
         for key, names in aliases.items():
             idx = next((i for i, c in enumerate(header) if c.lower() in names), None)
             row[key] = cols[idx] if idx is not None and idx < len(cols) else ""
-        if row.get("id", "").lower() in ("id", "题目id", "题目 id") or not row.get("id"):
+        if not row.get("id"):
             continue
+        if not row.get("category"):
+            row["category"] = section_category(section)
         rows.append(row)
     return rows
 
@@ -717,7 +783,9 @@ def main():
     TUNNEL = Tunnel(ws_url)
     bridge = ChatBridge()
     TUNNEL.on_control = bridge.submit
-    Watcher().start()
+    watcher = Watcher()
+    TUNNEL.on_connect = watcher.resync
+    watcher.start()
     srv = ThreadingHTTPServer(("127.0.0.1", LISTEN_PORT), ProxyHandler)
     log.info("LLM 转发器监听 http://127.0.0.1:%d → %s（含事件采集与 chat 桥）", LISTEN_PORT, http_url)
     srv.serve_forever()
