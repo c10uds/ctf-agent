@@ -38,6 +38,7 @@ REPO = HERE.parent.parent
 STATE: dict = {"envs": {}, "submitted": {}}
 CFG: dict = {}
 RUNNER_IMAGE = "ctf-pwn-runner"
+WEB_RUNNER_IMAGE = "ctf-web-runner"
 TOKEN = ""
 
 
@@ -65,38 +66,84 @@ def wait_port(port: int, host: str = "127.0.0.1", timeout: float = 20) -> bool:
     return False
 
 
-def ensure_runner_image() -> bool:
-    if subprocess.run(["docker", "image", "inspect", RUNNER_IMAGE],
-                      capture_output=True).returncode == 0:
-        return True
-    log("构建 pwn 运行镜像 ...")
-    dockerfile = "FROM ubuntu:24.04\nRUN apt-get update && apt-get install -y socat\n"
+def docker_image_exists(image: str) -> bool:
+    return subprocess.run(["docker", "image", "inspect", image],
+                          capture_output=True).returncode == 0
+
+
+def build_image(image: str, dockerfile: str) -> bool:
     tmp = HERE / "tmp"
     tmp.mkdir(parents=True, exist_ok=True)
-    df = tmp / "runner.Dockerfile"
+    df = tmp / "Dockerfile"
     df.write_text(dockerfile, encoding="utf-8")
-    rc = subprocess.run(["docker", "build", "-t", RUNNER_IMAGE, "-f", str(df), str(tmp)],
+    rc = subprocess.run(["docker", "build", "-t", image, "-f", str(df), str(tmp)],
                         capture_output=True, text=True)
     if rc.returncode != 0:
-        log("镜像构建失败：", rc.stderr[-500:])
+        log(f"构建 {image} 失败：", rc.stderr[-500:])
     return rc.returncode == 0
 
 
+def ensure_runner_image() -> bool:
+    if docker_image_exists(RUNNER_IMAGE):
+        return True
+    log("构建 pwn 运行镜像（socat + qemu-user-static）...")
+    return build_image(RUNNER_IMAGE,
+                       "FROM ubuntu:24.04\n"
+                       "RUN apt-get update && apt-get install -y --no-install-recommends socat qemu-user-static\n")
+
+
+def ensure_web_runner() -> bool:
+    if docker_image_exists(WEB_RUNNER_IMAGE):
+        return True
+    log("构建 web 运行镜像（python3 + flask + php）...")
+    return build_image(
+        WEB_RUNNER_IMAGE,
+        "FROM ubuntu:24.04\n"
+        "RUN apt-get update && apt-get install -y --no-install-recommends \\\n"
+        "      python3 python3-pip php-cli php-curl \\\n"
+        "    && python3 -m pip install --break-system-packages --no-cache-dir \\\n"
+        "      flask requests pyjwt\n")
+
+
 def start_web(ch: dict) -> dict:
+    """每个 web 题跑在一个 docker 容器里：python 或 php 运行时，可带一个内网服务。"""
+    if not ensure_web_runner():
+        raise RuntimeError("web 运行镜像不可用（docker 未就绪？）")
     port = int(ch["env"]["port"])
     flag_file = HERE / "tmp" / f"{ch['id']}.flag"
     flag_file.parent.mkdir(parents=True, exist_ok=True)
     flag_file.write_text(ch["flag"], encoding="utf-8")
-    entry = REPO / ch["env"]["entry"]
-    env = dict(os.environ, PORT=str(port), CTF_TOKEN=TOKEN,
-               FLAG_PATH=str(flag_file), PYTHONUNBUFFERED="1")
-    proc = subprocess.Popen([sys.executable, str(entry)], env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    appdir = (REPO / ch["env"]["dir"]).resolve()
+    name = f"ctf-web-{ch['id']}"
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+    internal = ch["env"].get("internal")
+    cmd = []
+    if internal:
+        cmd.append(f"INTERNAL_PORT={int(internal['port'])} FLAG_PATH=/flag "
+                   f"python3 {internal['entry']} &")
+    runtime = ch["env"].get("runtime", "python")
+    if runtime == "php":
+        cmd.append(f"exec php -S 0.0.0.0:{port} index.php")
+    else:
+        cmd.append(f"exec python3 {ch['env']['entry']}")
+
+    run = ["docker", "run", "-d", "--rm", "--name", name,
+           "-p", f"{port}:{port}",
+           "-v", f"{appdir}:/app:ro", "-v", f"{flag_file}:/flag:ro", "-w", "/app",
+           "-e", f"PORT={port}", "-e", f"CTF_TOKEN={TOKEN}", "-e", "FLAG_PATH=/flag"]
+    if internal:
+        run += ["-e", f"INTERNAL_URL=http://127.0.0.1:{int(internal['port'])}"]
+    run += [WEB_RUNNER_IMAGE, "bash", "-c", " ".join(cmd)]
+
+    rc = subprocess.run(run, capture_output=True, text=True)
+    if rc.returncode != 0:
+        raise RuntimeError(f"docker run 失败：{rc.stderr[-300:]}")
     if not wait_port(port):
-        proc.kill()
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
         raise RuntimeError(f"web 环境未能在 {port} 上就绪")
     host = CFG.get("public_host", "127.0.0.1")
-    return {"kind": "web", "pid": proc.pid, "url": f"http://{host}:{port}",
+    return {"kind": "web", "name": name, "url": f"http://{host}:{port}",
             "headers": {"X-CTF-Token": TOKEN}}
 
 
@@ -111,11 +158,14 @@ def start_pwn(ch: dict) -> dict:
     flag_file.write_text(ch["flag"], encoding="utf-8")
     name = f"ctf-env-{ch['id']}"
     subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    exe = f"/c/{binary}"
+    if ch["env"].get("exec_prefix"):
+        exe = f"{ch['env']['exec_prefix']} {exe}"
     cmd = ["docker", "run", "-d", "--rm", "--name", name,
            "-p", f"{port}:{port}",
            "-v", f"{dist}:/c:ro", "-v", f"{flag_file}:/flag:ro",
            RUNNER_IMAGE,
-           "socat", f"TCP-LISTEN:{port},reuseaddr,fork", f"EXEC:/c/{binary}"]
+           "socat", f"TCP-LISTEN:{port},reuseaddr,fork", f"EXEC:{exe}"]
     rc = subprocess.run(cmd, capture_output=True, text=True)
     if rc.returncode != 0:
         raise RuntimeError(f"docker run 失败：{rc.stderr[-300:]}")
@@ -131,10 +181,7 @@ def stop_env(cid: int) -> bool:
     if not env:
         return False
     if env.get("kind") == "web":
-        try:
-            subprocess.run(["taskkill", "/F", "/PID", str(env["pid"])], capture_output=True)
-        except Exception:
-            pass
+        subprocess.run(["docker", "rm", "-f", env["name"]], capture_output=True)
     elif env.get("kind") == "pwn":
         subprocess.run(["docker", "rm", "-f", env["name"]], capture_output=True)
     return True

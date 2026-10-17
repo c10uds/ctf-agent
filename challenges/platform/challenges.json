@@ -6,69 +6,114 @@
   "challenges": [
     {
       "id": 1,
-      "name": "fmtstr",
+      "name": "fmt_once",
       "category": "pwn",
-      "description": "一个只读两行输入的小程序。第二行会读进一个比你想象中更小的缓冲区。",
-      "score": 300,
-      "flag": "flag{f0rm4t_string_l34k_2_r3t2l1bc}",
+      "description": "只给你一次格式化字符串的机会，最多 31 字节。PIE + Canary + Full RELRO。",
+      "score": 400,
+      "flag": "flag{fmt_0nce_32b_c4n4ry_r0p}",
       "attachments": [
-        "challenges/pwn/fmtstr/dist/fmtstr",
-        "challenges/pwn/fmtstr/dist/libc.so.6",
-        "challenges/pwn/fmtstr/dist/ld-linux-x86-64.so.2"
+        "challenges/pwn/fmt_once/dist/fmt_once",
+        "challenges/pwn/fmt_once/dist/libc.so.6",
+        "challenges/pwn/fmt_once/dist/ld-linux-x86-64.so.2"
       ],
-      "env": {
-        "type": "pwn",
-        "port": 8201,
-        "binary": "challenges/pwn/fmtstr/dist/fmtstr",
-        "dist": "challenges/pwn/fmtstr/dist"
-      }
+      "env": {"type": "pwn", "port": 8201, "binary": "fmt_once", "dist": "challenges/pwn/fmt_once/dist"}
     },
     {
       "id": 2,
-      "name": "noteheap",
+      "name": "heap_doublefree",
       "category": "pwn",
-      "description": "笔记管理器：add/del/edit/show。编辑已释放的笔记是允许的。",
-      "score": 350,
-      "flag": "flag{h34p_u4f_tc4ch3_p01s0n_2_syst3m}",
+      "description": "笔记管理器。free 不置空、edit 可以改已释放块——想想 tcache 的 e->key。",
+      "score": 450,
+      "flag": "flag{tc4ch3_k3y_byp4ss_d0ubl3_fr33}",
       "attachments": [
-        "challenges/pwn/noteheap/dist/noteheap",
-        "challenges/pwn/noteheap/dist/libc.so.6",
-        "challenges/pwn/noteheap/dist/ld-linux-x86-64.so.2"
+        "challenges/pwn/heap_doublefree/dist/heap_doublefree",
+        "challenges/pwn/heap_doublefree/dist/libc.so.6",
+        "challenges/pwn/heap_doublefree/dist/ld-linux-x86-64.so.2"
       ],
-      "env": {
-        "type": "pwn",
-        "port": 8202,
-        "binary": "challenges/pwn/noteheap/dist/noteheap",
-        "dist": "challenges/pwn/noteheap/dist"
-      }
+      "env": {"type": "pwn", "port": 8202, "binary": "heap_doublefree", "dist": "challenges/pwn/heap_doublefree/dist"}
     },
     {
       "id": 3,
-      "name": "acme-login",
-      "category": "web",
-      "description": "内部登录门户，听说后端拼 SQL 很随意。所有请求必须带平台下发的请求头。",
-      "score": 250,
-      "flag": "flag{sql1_1nj3ct10n_b4s1c}",
-      "attachments": [],
-      "env": {
-        "type": "web",
-        "port": 8101,
-        "entry": "challenges/web/sqli/app.py"
-      }
+      "name": "ret2dlresolve",
+      "category": "pwn",
+      "description": "没有 PIE、没有 Canary、Partial RELRO，也没有任何 libc 泄露。",
+      "score": 450,
+      "flag": "flag{r3t2dlr3s0lv3_n0_l1bc_l34k}",
+      "attachments": ["challenges/pwn/ret2dlresolve/dist/ret2dlresolve"],
+      "env": {"type": "pwn", "port": 8203, "binary": "ret2dlresolve", "dist": "challenges/pwn/ret2dlresolve/dist"}
     },
     {
       "id": 4,
-      "name": "greeter",
+      "name": "sandbox_orw",
+      "category": "pwn",
+      "description": "静态链接，但装了 seccomp：只放行 read/write/open/openat/exit。",
+      "score": 500,
+      "flag": "flag{s3cc0mp_0rw_st4t1c_r0p}",
+      "attachments": ["challenges/pwn/sandbox_orw/dist/sandbox_orw"],
+      "env": {"type": "pwn", "port": 8204, "binary": "sandbox_orw", "dist": "challenges/pwn/sandbox_orw/dist"}
+    },
+    {
+      "id": 5,
+      "name": "arm_overflow",
+      "category": "pwn",
+      "description": "aarch64 静态，qemu-user 运行。注意缓冲区边界。",
+      "score": 500,
+      "flag": "flag{4arch64_q3mu_r0p_ch41n}",
+      "attachments": ["challenges/pwn/arm_overflow/dist/arm_overflow"],
+      "env": {"type": "pwn", "port": 8205, "binary": "arm_overflow",
+              "dist": "challenges/pwn/arm_overflow/dist", "exec_prefix": "qemu-aarch64-static"}
+    },
+    {
+      "id": 6,
+      "name": "sqli_blind",
       "category": "web",
-      "description": "问候页，name 参数直接进模板。过滤了 __。",
-      "score": 250,
-      "flag": "flag{sst1_j1nj4_2_rce}",
+      "description": "只有布尔结果。WAF 过滤空格、--、union、sleep、benchmark。",
+      "score": 400,
+      "flag": "flag{bl1nd_sql1_w4f_byp4ss}",
       "attachments": [],
-      "env": {
-        "type": "web",
-        "port": 8102,
-        "entry": "challenges/web/ssti/app.py"
-      }
+      "env": {"type": "web", "port": 8111, "dir": "challenges/web/sqli_blind", "entry": "app.py"}
+    },
+    {
+      "id": 7,
+      "name": "ssti_sandbox",
+      "category": "web",
+      "description": "name 参数进模板，黑名单：__ [ ] class mro globals builtins。",
+      "score": 400,
+      "flag": "flag{sst1_bl4ckl1st_4ttr_byp4ss}",
+      "attachments": [],
+      "env": {"type": "web", "port": 8112, "dir": "challenges/web/ssti_sandbox", "entry": "app.py"}
+    },
+    {
+      "id": 8,
+      "name": "ssrf_internal",
+      "category": "web",
+      "description": "/fetch?url= 会代你请求。内网有个服务，但它只监听 127.0.0.1。",
+      "score": 450,
+      "flag": "flag{ssrf_1nt3rn4l_127_1_byp4ss}",
+      "attachments": [],
+      "env": {"type": "web", "port": 8113, "dir": "challenges/web/ssrf_internal", "entry": "app.py",
+              "internal": {"entry": "internal_flag.py", "port": 8193}}
+    },
+    {
+      "id": 9,
+      "name": "php_unserialize",
+      "category": "web",
+      "description": "cookie 里的 data 会被 base64 解码后 unserialize。",
+      "score": 450,
+      "flag": "flag{php_g4dg3t_ch41n_un-s3r14l1z3}",
+      "attachments": [],
+      "env": {"type": "web", "port": 8114, "dir": "challenges/web/php_unserialize",
+              "runtime": "php", "entry": "index.php"}
+    },
+    {
+      "id": 10,
+      "name": "jwt_admin",
+      "category": "web",
+      "description": "HS256 的密钥很弱。/admin 只认 role=admin。",
+      "score": 400,
+      "flag": "flag{jwt_w34k_s3cr3t_4dm1n}",
+      "attachments": [],
+      "env": {"type": "web", "port": 8115, "dir": "challenges/web/jwt_admin", "entry": "app.py"}
     }
   ]
 }
