@@ -81,7 +81,7 @@
 - **状态文件格式是契约**（观测面板按列名解析，详见 `prompts/ctf-master.md` 的「状态文件格式」）：
   `SCOREBOARD.md` 只允许**一张表**，表头逐字为 `| id | name | category | score | current_score | status | flag | notes |`；
   `ENVIRONMENTS.md` 只允许一张表，表头为 `| id | entry | since | holder |`。不要拆成 pwn/web 两张表，也不要放图例/汇总等第二张表格。
-- 写入归属：SCOREBOARD/ENVIRONMENTS 只有 Master 写；REQUESTS 只有 Customer 写、Master 标记；env-requests 默认 worker 写、Master 删，被抢占的 web 题由 Master 代写入队；work/<id>/ 归该题 worker。
+- 写入归属：SCOREBOARD/ENVIRONMENTS 只有 Master 写；REQUESTS 只有 Customer 写、Master 标记；env-requests 默认 worker 写、Master 删，被抢占的 web 题由 Master 代写入队；work/<id>/ 归该题 worker。**例外**：Customer 在对话中获得用户**明确授权**后，可代用户直接改任意文件（并在 `REQUESTS.md` 留痕 `- [x] 用户授权直接执行：<做了什么>`）；授权必须来自用户当下的原话，Customer 不得自行推断或写入授权。平台四个工具（`submit_flag`/`start_challenge`/`stop_challenge`/`view_hint`）对 Customer 是配置层禁用，属于硬边界。
 - 每个写操作保持**追加优先**，不要整表重写覆盖他人刚写的内容。
 
 ## 得分规则（来自平台文档）
