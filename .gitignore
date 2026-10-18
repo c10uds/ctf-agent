@@ -28,3 +28,7 @@ __pycache__/
 Thumbs.db
 .DS_Store
 gateway/logs.bak/
+
+# 镜像导出产物（docker save | gzip，用于分发，勿提交）
+*.tar.gz
+*.tar
